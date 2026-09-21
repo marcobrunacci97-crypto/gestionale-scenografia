@@ -6,7 +6,8 @@ import sqlite3
 
 st.set_page_config(page_title="Gestionale Preventivi Scenografici", page_icon="🎬", layout="wide")
 
-DB_PATH = "gestionale_scenografia.db"
+# Cambiamo nome al DB per forzare la pulizia del database vecchio sul server
+DB_PATH = "gestionale_scenografia_v2.db"
 
 def get_connection():
     return sqlite3.connect(DB_PATH)
@@ -20,13 +21,6 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS impostazioni (chiave TEXT PRIMARY KEY, valore REAL NOT NULL, unita TEXT)''')
         c.execute('''CREATE TABLE IF NOT EXISTS preventivi (id INTEGER PRIMARY KEY AUTOINCREMENT, titolo TEXT NOT NULL, cliente TEXT NOT NULL, costo_diretto REAL, imponibile REAL, iva REAL, ivato REAL, km_trasporto REAL, costo_trasporto REAL, stato TEXT DEFAULT 'Bozza', revisione INTEGER DEFAULT 0, padre_id INTEGER DEFAULT 0, data_inizio TEXT, data_consegna TEXT, data_creazione DATETIME DEFAULT CURRENT_TIMESTAMP)''')
         c.execute('''CREATE TABLE IF NOT EXISTS voci_preventivo (id INTEGER PRIMARY KEY AUTOINCREMENT, preventivo_id INTEGER, tipo TEXT, nome TEXT, qta REAL, um TEXT, ore REAL, costo_base REAL, prezzo_vendita REAL)''')
-        
-        # Controllo colonna 'unita' nelle impostazioni per evitare errori
-        c.execute("PRAGMA table_info(impostazioni)")
-        colonne = [col[1] for col in c.fetchall()]
-        if "unita" not in colonne:
-            c.execute("ALTER TABLE impostazioni ADD COLUMN unita TEXT")
-            
         conn.commit()
     
     # Impostazioni di default con unità di misura
@@ -67,7 +61,7 @@ def init_db():
                 "Studi di Cinecittà - Cliente principale pre-caricato"
             ))
 
-        # Materiali iniziali
+        # Materiali iniziali completi
         c.execute("SELECT COUNT(*) FROM materiali")
         if c.fetchone()[0] == 0:
             mat_iniziali = [
@@ -78,7 +72,7 @@ def init_db():
             ]
             c.executemany("INSERT INTO materiali (codice, nome, prezzo, unita, sfrido) VALUES (?, ?, ?, ?, ?)", mat_iniziali)
 
-        # Lavorazioni iniziali
+        # Lavorazioni iniziali complete
         c.execute("SELECT COUNT(*) FROM lavorazioni")
         if c.fetchone()[0] == 0:
             lav_iniziali = [
