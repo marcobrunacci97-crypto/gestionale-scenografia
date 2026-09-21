@@ -20,6 +20,13 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS impostazioni (chiave TEXT PRIMARY KEY, valore REAL NOT NULL, unita TEXT)''')
         c.execute('''CREATE TABLE IF NOT EXISTS preventivi (id INTEGER PRIMARY KEY AUTOINCREMENT, titolo TEXT NOT NULL, cliente TEXT NOT NULL, costo_diretto REAL, imponibile REAL, iva REAL, ivato REAL, km_trasporto REAL, costo_trasporto REAL, stato TEXT DEFAULT 'Bozza', revisione INTEGER DEFAULT 0, padre_id INTEGER DEFAULT 0, data_inizio TEXT, data_consegna TEXT, data_creazione DATETIME DEFAULT CURRENT_TIMESTAMP)''')
         c.execute('''CREATE TABLE IF NOT EXISTS voci_preventivo (id INTEGER PRIMARY KEY AUTOINCREMENT, preventivo_id INTEGER, tipo TEXT, nome TEXT, qta REAL, um TEXT, ore REAL, costo_base REAL, prezzo_vendita REAL)''')
+        
+        # Controllo di sicurezza: se la tabella impostazioni esiste ma manca la colonna 'unita', la aggiungiamo
+        c.execute("PRAGMA table_info(impostazioni)")
+        colonne = [col[1] for col in c.fetchall()]
+        if "unita" not in colonne:
+            c.execute("ALTER TABLE impostazioni ADD COLUMN unita TEXT")
+            
         conn.commit()
     
     # Impostazioni di default con relative Unità di Misura
@@ -315,8 +322,8 @@ with tab_imp:
     with st.form("form_imp"):
         nuovi_valori = {}
         for r in rows:
-             chiave, valore_corrente, um = r[0], r[1], r[2]
-             etichetta = f"{chiave.replace('_', ' ').capitalize()} ({um})"
+             chiave, valore_corrente, um = r[0], r[1], r[2] if len(r) > 2 and r[2] else ""
+             etichetta = f"{chiave.replace('_', ' ').capitalize()} ({um})" if um else chiave.replace('_', ' ').capitalize()
              nuovi_valori[chiave] = st.number_input(etichetta, value=float(valore_corrente))
              
         if st.form_submit_button("Salva Impostazioni"):
