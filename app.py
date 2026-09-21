@@ -87,6 +87,127 @@ def get_imp_dict():
         c.execute("SELECT chiave, valore FROM impostazioni")
         return dict(c.fetchall())
 
+# --- POP-UP MODALI PER LA MODIFICA ---
+@st.dialog("Modifica Cliente")
+def dialog_modifica_cliente(cid):
+    with get_connection() as conn:
+        df = pd.read_sql("SELECT * FROM clienti WHERE id = ?", conn, params=(cid,))
+    if df.empty:
+        st.error("Cliente non trovato.")
+        if st.button("Chiudi"):
+            del st.session_state["edit_cliente_id"]
+            st.rerun()
+        return
+    
+    row = df.iloc[0]
+    with st.form(f"form_d_cli_{cid}"):
+        e_nome = st.text_input("Nome Cliente*", value=str(row["nome"]))
+        e_tel = st.text_input("Telefono", value=str(row["telefono"] or ""))
+        e_email = st.text_input("Email", value=str(row["email"] or ""))
+        e_pec = st.text_input("PEC", value=str(row["pec"] or ""))
+        e_indirizzo = st.text_input("Indirizzo", value=str(row["indirizzo"] or ""))
+        e_piva = st.text_input("Partita IVA", value=str(row["piva"] or ""))
+        e_note = st.text_area("Note", value=str(row["note"] or ""))
+        
+        c1, c2 = st.columns(2)
+        salva = c1.form_submit_button("💾 Salva")
+        elimina = c2.form_submit_button("🗑️ Elimina")
+        
+        if salva:
+            with get_connection() as conn:
+                conn.execute("UPDATE clienti SET nome=?, telefono=?, email=?, pec=?, indirizzo=?, piva=?, note=? WHERE id=?",
+                             (e_nome, e_tel, e_email, e_pec, e_indirizzo, e_piva, e_note, cid))
+                conn.commit()
+            st.success("Cliente aggiornato!")
+            del st.session_state["edit_cliente_id"]
+            st.rerun()
+        if elimina:
+            with get_connection() as conn:
+                conn.execute("DELETE FROM clienti WHERE id=?", (cid,))
+                conn.commit()
+            st.warning("Cliente eliminato!")
+            del st.session_state["edit_cliente_id"]
+            st.rerun()
+
+@st.dialog("Modifica Materiale")
+def dialog_modifica_materiale(mid):
+    with get_connection() as conn:
+        df = pd.read_sql("SELECT * FROM materiali WHERE id = ?", conn, params=(mid,))
+    if df.empty:
+        st.error("Materiale non trovato.")
+        if st.button("Chiudi"):
+            del st.session_state["edit_materiale_id"]
+            st.rerun()
+        return
+    
+    row = df.iloc[0]
+    with st.form(f"form_d_mat_{mid}"):
+        e_cod = st.text_input("Codice", value=str(row["codice"] or ""))
+        e_nome = st.text_input("Nome Materiale*", value=str(row["nome"] or ""))
+        e_prezzo = st.number_input("Prezzo Acquisto (€)", min_value=0.0, value=float(row["prezzo"]))
+        e_unita = st.text_input("U.M.", value=str(row["unita"] or ""))
+        e_sfrido = st.number_input("Sfrido %", value=float(row["sfrido"]))
+        
+        c1, c2 = st.columns(2)
+        salva = c1.form_submit_button("💾 Salva")
+        elimina = c2.form_submit_button("🗑️ Elimina")
+        
+        if salva:
+            with get_connection() as conn:
+                conn.execute("UPDATE materiali SET codice=?, nome=?, prezzo=?, unita=?, sfrido=? WHERE id=?",
+                             (e_cod, e_nome, e_prezzo, e_unita, e_sfrido, mid))
+                conn.commit()
+            st.success("Materiale aggiornato!")
+            del st.session_state["edit_materiale_id"]
+            st.rerun()
+        if elimina:
+            with get_connection() as conn:
+                conn.execute("DELETE FROM materiali WHERE id=?", (mid,))
+                conn.commit()
+            st.warning("Materiale eliminato!")
+            del st.session_state["edit_materiale_id"]
+            st.rerun()
+
+@st.dialog("Modifica Lavorazione")
+def dialog_modifica_lavorazione(lid):
+    with get_connection() as conn:
+        df = pd.read_sql("SELECT * FROM lavorazioni WHERE id = ?", conn, params=(lid,))
+    if df.empty:
+        st.error("Lavorazione non trovata.")
+        if st.button("Chiudi"):
+            del st.session_state["edit_lavorazione_id"]
+            st.rerun()
+        return
+    
+    row = df.iloc[0]
+    with st.form(f"form_d_lav_{lid}"):
+        e_cod = st.text_input("Codice", value=str(row["codice"] or ""))
+        e_nome = st.text_input("Nome Lavorazione*", value=str(row["nome"] or ""))
+        e_costo = st.number_input("Costo Orario (€/h)", min_value=0.0, value=float(row["costo_orario"]))
+        e_unita = st.text_input("U.M.", value=str(row["unita"] or ""))
+        e_ore = st.number_input("Ore per U.M.", value=float(row["ore_um"]))
+        
+        c1, c2 = st.columns(2)
+        salva = c1.form_submit_button("💾 Salva")
+        elimina = c2.form_submit_button("🗑️ Elimina")
+        
+        if salva:
+            with get_connection() as conn:
+                conn.execute("UPDATE lavorazioni SET codice=?, nome=?, costo_orario=?, unita=?, ore_um=? WHERE id=?",
+                             (e_cod, e_nome, e_costo, e_unita, e_ore, lid))
+                conn.commit()
+            st.success("Lavorazione aggiornata!")
+            del st.session_state["edit_lavorazione_id"]
+            st.rerun()
+        if elimina:
+            with get_connection() as conn:
+                conn.execute("DELETE FROM lavorazioni WHERE id=?", (lid,))
+                conn.commit()
+            st.warning("Lavorazione eliminata!")
+            del st.session_state["edit_lavorazione_id"]
+            st.rerun()
+
+
 st.title("🎬 Gestionale Preventivi Scenografici")
 
 tab_dash, tab_prev, tab_cli, tab_mat, tab_lav, tab_imp = st.tabs(["📊 Dashboard", "📋 Preventivi", "👥 Clienti", "📦 Materiali", "🛠️ Lavorazioni", "⚙️ Impostazioni"])
@@ -237,7 +358,7 @@ with tab_prev:
     else:
         st.info("Nessun preventivo salvato.")
 
-# --- TAB CLIENTI (ID cliccabili ed esplodibili) ---
+# --- TAB CLIENTI ---
 with tab_cli:
     st.subheader("Anagrafica Clienti")
     
@@ -258,7 +379,7 @@ with tab_cli:
                 st.rerun()
 
     st.markdown("---")
-    st.markdown("### Elenco Clienti Esistenti (Clicca sull'ID per esplodere e modificare)")
+    st.markdown("### Elenco Clienti (Clicca su una riga per aprire il modale di modifica)")
     
     with get_connection() as conn:
         df_clienti = pd.read_sql("SELECT * FROM clienti", conn)
@@ -266,39 +387,17 @@ with tab_cli:
     if df_clienti.empty:
         st.info("Nessun cliente inserito.")
     else:
-        for _, row in df_clienti.iterrows():
-            cid = row["id"]
-            cname = row["nome"]
-            with st.expander(f"🆔 ID {cid} — {cname}"):
-                with st.form(f"form_edit_cliente_{cid}"):
-                    e_nome = st.text_input("Nome Cliente*", value=row["nome"], key=f"cn_{cid}")
-                    e_tel = st.text_input("Telefono", value=str(row["telefono"] or ""), key=f"ct_{cid}")
-                    e_email = st.text_input("Email", value=str(row["email"] or ""), key=f"ce_{cid}")
-                    e_pec = st.text_input("PEC", value=str(row["pec"] or ""), key=f"cp_{cid}")
-                    e_indirizzo = st.text_input("Indirizzo", value=str(row["indirizzo"] or ""), key=f"ci_{cid}")
-                    e_piva = st.text_input("Partita IVA", value=str(row["piva"] or ""), key=f"cpi_{cid}")
-                    e_note = st.text_area("Note", value=str(row["note"] or ""), key=f"cnt_{cid}")
-                    
-                    col_upd, col_del = st.columns(2)
-                    aggiorna = col_upd.form_submit_button("💾 Salva Modifiche")
-                    elimina = col_del.form_submit_button("🗑️ Elimina Record")
-                    
-                    if aggiorna:
-                        with get_connection() as conn:
-                            conn.execute("""
-                                UPDATE clienti SET nome=?, telefono=?, email=?, pec=?, indirizzo=?, piva=?, note=? WHERE id=?
-                            """, (e_nome, e_tel, e_email, e_pec, e_indirizzo, e_piva, e_note, cid))
-                            conn.commit()
-                        st.success(f"Cliente #{cid} aggiornato con successo!")
-                        st.rerun()
-                    if elimina:
-                        with get_connection() as conn:
-                            conn.execute("DELETE FROM clienti WHERE id=?", (cid,))
-                            conn.commit()
-                        st.warning(f"Cliente #{cid} eliminato!")
-                        st.rerun()
+        event_cli = st.dataframe(df_clienti, selection_mode="single-row", on_select="rerun", key="grid_clienti", use_container_width=True)
+        if event_cli.selection.rows:
+            row_idx = event_cli.selection.rows[0]
+            cid = int(df_clienti.iloc[row_idx]["id"])
+            st.session_state["edit_cliente_id"] = cid
+            st.rerun()
 
-# --- TAB MATERIALI (ID cliccabili ed esplodibili) ---
+    if "edit_cliente_id" in st.session_state:
+        dialog_modifica_cliente(st.session_state["edit_cliente_id"])
+
+# --- TAB MATERIALI ---
 with tab_mat:
     st.subheader("Listino Materiali")
     
@@ -317,7 +416,7 @@ with tab_mat:
                 st.rerun()
 
     st.markdown("---")
-    st.markdown("### Elenco Materiali Esistenti (Clicca sull'ID per esplodere e modificare)")
+    st.markdown("### Elenco Materiali (Clicca su una riga per aprire il modale di modifica)")
     
     with get_connection() as conn:
         df_mat = pd.read_sql("SELECT * FROM materiali", conn)
@@ -325,38 +424,17 @@ with tab_mat:
     if df_mat.empty:
         st.info("Nessun materiale inserito.")
     else:
-        for _, row in df_mat.iterrows():
-            mid = row["id"]
-            mname = row["nome"]
-            mcode = row["codice"]
-            with st.expander(f"🆔 ID {mid} — [{mcode}] {mname}"):
-                with st.form(f"form_edit_mat_{mid}"):
-                    e_cod = st.text_input("Codice", value=str(row["codice"] or ""), key=f"mc_{mid}")
-                    e_nome = st.text_input("Nome Materiale*", value=str(row["nome"] or ""), key=f"mn_{mid}")
-                    e_prezzo = st.number_input("Prezzo Acquisto (€)", min_value=0.0, value=float(row["prezzo"]), key=f"mp_{mid}")
-                    e_unita = st.text_input("U.M.", value=str(row["unita"] or ""), key=f"mu_{mid}")
-                    e_sfrido = st.number_input("Sfrido %", value=float(row["sfrido"]), key=f"ms_{mid}")
-                    
-                    col_upd, col_del = st.columns(2)
-                    aggiorna = col_upd.form_submit_button("💾 Salva Modifiche")
-                    elimina = col_del.form_submit_button("🗑️ Elimina Record")
-                    
-                    if aggiorna:
-                        with get_connection() as conn:
-                            conn.execute("""
-                                UPDATE materiali SET codice=?, nome=?, prezzo=?, unita=?, sfrido=? WHERE id=?
-                            """, (e_cod, e_nome, e_prezzo, e_unita, e_sfrido, mid))
-                            conn.commit()
-                        st.success(f"Materiale #{mid} aggiornato!")
-                        st.rerun()
-                    if elimina:
-                        with get_connection() as conn:
-                            conn.execute("DELETE FROM materiali WHERE id=?", (mid,))
-                            conn.commit()
-                        st.warning(f"Materiale #{mid} eliminato!")
-                        st.rerun()
+        event_mat = st.dataframe(df_mat, selection_mode="single-row", on_select="rerun", key="grid_mat", use_container_width=True)
+        if event_mat.selection.rows:
+            row_idx = event_mat.selection.rows[0]
+            mid = int(df_mat.iloc[row_idx]["id"])
+            st.session_state["edit_materiale_id"] = mid
+            st.rerun()
 
-# --- TAB LAVORAZIONI (ID cliccabili ed esplodibili) ---
+    if "edit_materiale_id" in st.session_state:
+        dialog_modifica_materiale(st.session_state["edit_materiale_id"])
+
+# --- TAB LAVORAZIONI ---
 with tab_lav:
     st.subheader("Listino Lavorazioni Laboratorio")
     
@@ -375,7 +453,7 @@ with tab_lav:
                 st.rerun()
 
     st.markdown("---")
-    st.markdown("### Elenco Lavorazioni Esistenti (Clicca sull'ID per esplodere e modificare)")
+    st.markdown("### Elenco Lavorazioni (Clicca su una riga per aprire il modale di modifica)")
     
     with get_connection() as conn:
         df_lav = pd.read_sql("SELECT * FROM lavorazioni", conn)
@@ -383,36 +461,15 @@ with tab_lav:
     if df_lav.empty:
         st.info("Nessuna lavorazione inserita.")
     else:
-        for _, row in df_lav.iterrows():
-            lid = row["id"]
-            lname = row["nome"]
-            lcode = row["codice"]
-            with st.expander(f"🆔 ID {lid} — [{lcode}] {lname}"):
-                with st.form(f"form_edit_lav_{lid}"):
-                    e_cod = st.text_input("Codice", value=str(row["codice"] or ""), key=f"lc_{lid}")
-                    e_nome = st.text_input("Nome Lavorazione*", value=str(row["nome"] or ""), key=f"ln_{lid}")
-                    e_costo = st.number_input("Costo Orario (€/h)", min_value=0.0, value=float(row["costo_orario"]), key=f"lco_{lid}")
-                    e_unita = st.text_input("U.M.", value=str(row["unita"] or ""), key=f"lu_{lid}")
-                    e_ore = st.number_input("Ore per U.M.", value=float(row["ore_um"]), key=f"lor_{lid}")
-                    
-                    col_upd, col_del = st.columns(2)
-                    aggiorna = col_upd.form_submit_button("💾 Salva Modifiche")
-                    elimina = col_del.form_submit_button("🗑️ Elimina Record")
-                    
-                    if aggiorna:
-                        with get_connection() as conn:
-                            conn.execute("""
-                                UPDATE lavorazioni SET codice=?, nome=?, costo_orario=?, unita=?, ore_um=? WHERE id=?
-                            """, (e_cod, e_nome, e_costo, e_unita, e_ore, lid))
-                            conn.commit()
-                        st.success(f"Lavorazione #{lid} aggiornata!")
-                        st.rerun()
-                    if elimina:
-                        with get_connection() as conn:
-                            conn.execute("DELETE FROM lavorazioni WHERE id=?", (lid,))
-                            conn.commit()
-                        st.warning(f"Lavorazione #{lid} eliminata!")
-                        st.rerun()
+        event_lav = st.dataframe(df_lav, selection_mode="single-row", on_select="rerun", key="grid_lav", use_container_width=True)
+        if event_lav.selection.rows:
+            row_idx = event_lav.selection.rows[0]
+            lid = int(df_lav.iloc[row_idx]["id"])
+            st.session_state["edit_lavorazione_id"] = lid
+            st.rerun()
+
+    if "edit_lavorazione_id" in st.session_state:
+        dialog_modifica_lavorazione(st.session_state["edit_lavorazione_id"])
 
 # --- TAB IMPOSTAZIONI ---
 with tab_imp:
