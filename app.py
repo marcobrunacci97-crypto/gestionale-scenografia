@@ -17,27 +17,76 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS clienti (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL, telefono TEXT, email TEXT, pec TEXT, indirizzo TEXT, piva TEXT, note TEXT)''')
         c.execute('''CREATE TABLE IF NOT EXISTS materiali (id INTEGER PRIMARY KEY AUTOINCREMENT, codice TEXT UNIQUE, nome TEXT NOT NULL, prezzo REAL NOT NULL, unita TEXT, sfrido REAL DEFAULT 10.0)''')
         c.execute('''CREATE TABLE IF NOT EXISTS lavorazioni (id INTEGER PRIMARY KEY AUTOINCREMENT, codice TEXT UNIQUE, nome TEXT NOT NULL, costo_orario REAL NOT NULL, unita TEXT, ore_um REAL DEFAULT 1.0)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS impostazioni (chiave TEXT PRIMARY KEY, valore REAL NOT NULL)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS impostazioni (chiave TEXT PRIMARY KEY, valore REAL NOT NULL, unita TEXT)''')
         c.execute('''CREATE TABLE IF NOT EXISTS preventivi (id INTEGER PRIMARY KEY AUTOINCREMENT, titolo TEXT NOT NULL, cliente TEXT NOT NULL, costo_diretto REAL, imponibile REAL, iva REAL, ivato REAL, km_trasporto REAL, costo_trasporto REAL, stato TEXT DEFAULT 'Bozza', revisione INTEGER DEFAULT 0, padre_id INTEGER DEFAULT 0, data_inizio TEXT, data_consegna TEXT, data_creazione DATETIME DEFAULT CURRENT_TIMESTAMP)''')
         c.execute('''CREATE TABLE IF NOT EXISTS voci_preventivo (id INTEGER PRIMARY KEY AUTOINCREMENT, preventivo_id INTEGER, tipo TEXT, nome TEXT, qta REAL, um TEXT, ore REAL, costo_base REAL, prezzo_vendita REAL)''')
         conn.commit()
     
+    # Impostazioni di default con relative Unità di Misura
     defaults = {
-        "iva": 22.0, "sfrido_generale": 10.0, "ricarico_materiali": 35.0,
-        "ricarico_manodopera": 25.0, "spese_generali": 20.0, "markup_finale": 30.0,
-        "costo_km": 0.90, "paga_falegname": 40.0, "paga_fabbro": 45.0,
-        "paga_pittore": 40.0, "paga_elettricista": 40.0,
-        "paga_amministrazione": 25.0, "paga_titolare": 40.0
+        "iva": (22.0, "%"), 
+        "sfrido_generale": (10.0, "%"), 
+        "ricarico_materiali": (35.0, "%"), 
+        "ricarico_manodopera": (25.0, "%"),
+        "spese_generali": (20.0, "%"), 
+        "markup_finale": (30.0, "%"), 
+        "costo_km": (0.90, "€/km"), 
+        "paga_falegname": (40.0, "€/h"), 
+        "paga_fabbro": (45.0, "€/h"),
+        "paga_pittore": (40.0, "€/h"), 
+        "paga_elettricista": (40.0, "€/h"),
+        "paga_amministrazione": (25.0, "€/h"), 
+        "paga_titolare": (40.0, "€/h")
     }
+    
     with get_connection() as conn:
         c = conn.cursor()
         for k, v in defaults.items():
-            c.execute("INSERT OR IGNORE INTO impostazioni (chiave, valore) VALUES (?, ?)", (k, v))
+            c.execute("INSERT OR IGNORE INTO impostazioni (chiave, valore, unita) VALUES (?, ?, ?)", (k, v[0], v[1]))
+        
+        # Inserimento Cliente Iniziale (solo se la tabella è vuota)
+        c.execute("SELECT COUNT(*) FROM clienti")
+        if c.fetchone()[0] == 0:
+            c.execute("""
+                INSERT INTO clienti (nome, telefono, email, pec, indirizzo, piva, note) 
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                "Cinecittà S.p.A.", 
+                "+39 06 722911", 
+                "info@cinecittaspa.it", 
+                "cinecittaspa@legalmail.it", 
+                "Via Tuscolana 1055, 00173 Roma (RM)", 
+                "06385451003", 
+                "Studi di Cinecittà - Cliente principale pre-caricato"
+            ))
+
+        # Inserimento Materiali di esempio (solo se la tabella è vuota)
+        c.execute("SELECT COUNT(*) FROM materiali")
+        if c.fetchone()[0] == 0:
+            mat_iniziali = [
+                ("MAT-001", "Pannello multistrato pioppo 10mm", 18.50, "m²", 10.0),
+                ("MAT-002", "Listello abete 20x20mm", 2.20, "m", 15.0),
+                ("MAT-003", "Pannello MDF 19mm", 28.00, "m²", 10.0),
+                ("MAT-004", "Viti truciolari 4x40 (confezione)", 12.50, "pz", 5.0)
+            ]
+            c.executemany("INSERT INTO materiali (codice, nome, prezzo, unita, sfrido) VALUES (?, ?, ?, ?, ?)", mat_iniziali)
+
+        # Inserimento Lavorazioni di esempio (solo se la tabella è vuota)
+        c.execute("SELECT COUNT(*) FROM lavorazioni")
+        if c.fetchone()[0] == 0:
+            lav_iniziali = [
+                ("LAV-001", "Taglio e squadratura legnami", 40.0, "m²", 1.0),
+                ("LAV-002", "Assemblaggio struttura scenografica", 40.0, "h", 1.0),
+                ("LAV-003", "Stuccatura e levigatura", 40.0, "m²", 1.5),
+                ("LAV-004", "Decorazione e pittura scenografica", 45.0, "m²", 1.2)
+            ]
+            c.executemany("INSERT INTO lavorazioni (codice, nome, costo_orario, unita, ore_um) VALUES (?, ?, ?, ?, ?)", lav_iniziali)
+            
         conn.commit()
 
 init_db()
 
-def get_imp():
+def get_imp_dict():
     with get_connection() as conn:
         c = conn.cursor()
         c.execute("SELECT chiave, valore FROM impostazioni")
@@ -72,13 +121,6 @@ with tab_dash:
     else:
         st.info("Nessun preventivo inserito.")
 
-    with st.expander("ℹ️ Guida Indicatori"):
-        st.markdown("""
-        * **Tasso di Conversione:** Percentuale di preventivi approvati sul totale.
-        * **Fatturato Pipeline:** Somma degli imponibili di tutti i preventivi.
-        * **Margine Medio Reale:** Guadagno percentuale effettivo rispetto ai costi.
-        """)
-
 # --- TAB PREVENTIVI ---
 with tab_prev:
     st.subheader("Gestione Preventivi")
@@ -94,7 +136,7 @@ with tab_prev:
             l_lav = c.fetchall()
 
         if not clienti:
-            st.warning("⚠️ Prima di creare un preventivo, inserisci almeno un cliente nella sezione 'Clienti'.")
+            st.warning("⚠️ Inserisci prima almeno un cliente nella sezione 'Clienti'.")
         else:
             p_titolo = st.text_input("Titolo Progetto*")
             p_cliente = st.selectbox("Cliente*", clienti)
@@ -107,7 +149,6 @@ with tab_prev:
             if "voci_temp" not in st.session_state:
                 st.session_state.voci_temp = []
 
-            # Aggiunta Materiale
             col_m1, col_m2, col_m3 = st.columns([3, 1, 1])
             sel_mat = col_m1.selectbox("Seleziona Materiale", [m[0] for m in l_mat] if l_mat else ["Nessun materiale"])
             qta_mat = col_m2.number_input("Q.tà Mat.", min_value=0.1, value=1.0)
@@ -115,12 +156,11 @@ with tab_prev:
                 m_obj = next((m for m in l_mat if m[0] == sel_mat), None)
                 if m_obj:
                     costo = m_obj[1] * qta_mat * (1 + m_obj[3]/100.0)
-                    imp_val = get_imp()
+                    imp_val = get_imp_dict()
                     vendita = costo * (1 + imp_val.get("ricarico_materiali", 35)/100.0)
                     st.session_state.voci_temp.append({"tipo": "Materiale", "nome": m_obj[0], "qta": qta_mat, "um": m_obj[2], "ore": 0.0, "costo_base": costo, "prezzo": vendita})
                     st.success(f"Aggiunto: {m_obj[0]}")
 
-            # Aggiunta Lavorazione
             col_l1, col_l2, col_l3, col_l4 = st.columns([2, 1, 1, 1])
             sel_lav = col_l1.selectbox("Seleziona Lavorazione", [l[0] for l in l_lav] if l_lav else ["Nessuna lavorazione"])
             qta_lav = col_l2.number_input("Q.tà Lav.", min_value=0.1, value=1.0)
@@ -129,7 +169,7 @@ with tab_prev:
                 l_obj = next((l for l in l_lav if l[0] == sel_lav), None)
                 if l_obj:
                     costo = ore_lav * l_obj[1]
-                    imp_val = get_imp()
+                    imp_val = get_imp_dict()
                     vendita = costo * (1 + imp_val.get("ricarico_manodopera", 25)/100.0)
                     st.session_state.voci_temp.append({"tipo": "Lavorazione", "nome": l_obj[0], "qta": qta_lav, "um": l_obj[2], "ore": ore_lav, "costo_base": costo, "prezzo": vendita})
                     st.success(f"Aggiunta lavorazione: {l_obj[0]}")
@@ -149,7 +189,7 @@ with tab_prev:
                 if not p_titolo:
                     st.error("Inserisci il titolo del progetto.")
                 else:
-                    imp = get_imp()
+                    imp = get_imp_dict()
                     voci = st.session_state.voci_temp
                     
                     c_mat = sum(v["costo_base"] for v in voci if v["tipo"] == "Materiale")
@@ -221,14 +261,15 @@ with tab_cli:
                 st.success("Cliente aggiunto!")
                 st.rerun()
     with get_connection() as conn:
-        st.dataframe(pd.read_sql("SELECT * FROM clienti", conn), use_container_width=True)
+        df_clienti = pd.read_sql("SELECT * FROM clienti", conn)
+    st.dataframe(df_clienti, use_container_width=True)
 
 # --- TAB MATERIALI ---
 with tab_mat:
     st.subheader("Listino Materiali")
     with st.expander("➕ Aggiungi Materiale"):
         with st.form("form_mat"):
-            m_cod = st.text_input("Codice", "MAT-001")
+            m_cod = st.text_input("Codice", "MAT-005")
             m_nome = st.text_input("Nome Materiale*")
             m_prezzo = st.number_input("Prezzo Acquisto (€)", min_value=0.0, value=10.0)
             m_unita = st.text_input("U.M. (es. pz, m, kg)", "pz")
@@ -237,17 +278,18 @@ with tab_mat:
                 with get_connection() as conn:
                     conn.execute("INSERT OR REPLACE INTO materiali (codice, nome, prezzo, unita, sfrido) VALUES (?,?,?,?,?)", (m_cod, m_nome, m_prezzo, m_unita, m_sfrido))
                     conn.commit()
-                st.success("Materiale salvato!")
+                st.success("Materiale salvato e aggiunto al listino!")
                 st.rerun()
     with get_connection() as conn:
-        st.dataframe(pd.read_sql("SELECT * FROM materiali", conn), use_container_width=True)
+        df_mat = pd.read_sql("SELECT * FROM materiali", conn)
+    st.dataframe(df_mat, use_container_width=True)
 
 # --- TAB LAVORAZIONI ---
 with tab_lav:
     st.subheader("Listino Lavorazioni Laboratorio")
     with st.expander("➕ Aggiungi Lavorazione"):
         with st.form("form_lav"):
-            l_cod = st.text_input("Codice", "LAV-001")
+            l_cod = st.text_input("Codice", "LAV-005")
             l_nome = st.text_input("Nome Lavorazione*")
             l_costo = st.number_input("Costo Orario (€/h)", min_value=0.0, value=40.0)
             l_unita = st.text_input("U.M.", "m²")
@@ -256,22 +298,30 @@ with tab_lav:
                 with get_connection() as conn:
                     conn.execute("INSERT OR REPLACE INTO lavorazioni (codice, nome, costo_orario, unita, ore_um) VALUES (?,?,?,?,?)", (l_cod, l_nome, l_costo, l_unita, l_ore))
                     conn.commit()
-                st.success("Lavorazione salvata!")
+                st.success("Lavorazione salvata e aggiunta al listino!")
                 st.rerun()
     with get_connection() as conn:
-        st.dataframe(pd.read_sql("SELECT * FROM lavorazioni", conn), use_container_width=True)
+        df_lav = pd.read_sql("SELECT * FROM lavorazioni", conn)
+    st.dataframe(df_lav, use_container_width=True)
 
 # --- TAB IMPOSTAZIONI ---
 with tab_imp:
     st.subheader("Parametri Generali e Ricarichi")
-    imp = get_imp()
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT chiave, valore, unita FROM impostazioni")
+        rows = c.fetchall()
+        
     with st.form("form_imp"):
         nuovi_valori = {}
-        for k, v in imp.items():
-            nuovi_valori[k] = st.number_input(k.replace("_", " ").capitalize(), value=float(v))
+        for r in rows:
+             chiave, valore_corrente, um = r[0], r[1], r[2]
+             etichetta = f"{chiave.replace('_', ' ').capitalize()} ({um})"
+             nuovi_valori[chiave] = st.number_input(etichetta, value=float(valore_corrente))
+             
         if st.form_submit_button("Salva Impostazioni"):
             with get_connection() as conn:
                 for k, v in nuovi_valori.items():
                     conn.execute("UPDATE impostazioni SET valore=? WHERE chiave=?", (v, k))
                 conn.commit()
-            st.success("Impostazioni aggiornate!")
+            st.success("Impostazioni aggiornate con successo!")
