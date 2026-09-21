@@ -1,12 +1,10 @@
 import streamlit as st
 import pandas as pd
 import datetime
-import os
 import sqlite3
 
 st.set_page_config(page_title="Gestionale Preventivi Scenografici", page_icon="🎬", layout="wide")
 
-# Cambiamo nome al DB per forzare la pulizia del database vecchio sul server
 DB_PATH = "gestionale_scenografia_v2.db"
 
 def get_connection():
@@ -23,7 +21,6 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS voci_preventivo (id INTEGER PRIMARY KEY AUTOINCREMENT, preventivo_id INTEGER, tipo TEXT, nome TEXT, qta REAL, um TEXT, ore REAL, costo_base REAL, prezzo_vendita REAL)''')
         conn.commit()
     
-    # Impostazioni di default con unità di misura
     defaults = {
         "iva": (22.0, "%"), 
         "sfrido_generale": (10.0, "%"), 
@@ -45,7 +42,6 @@ def init_db():
         for k, v in defaults.items():
             c.execute("INSERT OR IGNORE INTO impostazioni (chiave, valore, unita) VALUES (?, ?, ?)", (k, v[0], v[1]))
         
-        # Cliente iniziale Cinecittà
         c.execute("SELECT COUNT(*) FROM clienti")
         if c.fetchone()[0] == 0:
             c.execute("""
@@ -61,7 +57,6 @@ def init_db():
                 "Studi di Cinecittà - Cliente principale pre-caricato"
             ))
 
-        # Materiali iniziali completi
         c.execute("SELECT COUNT(*) FROM materiali")
         if c.fetchone()[0] == 0:
             mat_iniziali = [
@@ -72,7 +67,6 @@ def init_db():
             ]
             c.executemany("INSERT INTO materiali (codice, nome, prezzo, unita, sfrido) VALUES (?, ?, ?, ?, ?)", mat_iniziali)
 
-        # Lavorazioni iniziali complete
         c.execute("SELECT COUNT(*) FROM lavorazioni")
         if c.fetchone()[0] == 0:
             lav_iniziali = [
@@ -243,67 +237,59 @@ with tab_prev:
     else:
         st.info("Nessun preventivo salvato.")
 
-# --- TAB CLIENTI ---
+# --- TAB CLIENTI (Modificabile direttamente) ---
 with tab_cli:
     st.subheader("Anagrafica Clienti")
-    with st.expander("➕ Aggiungi Nuovo Cliente"):
-        with st.form("form_cliente"):
-            cnome = st.text_input("Nome Cliente*")
-            ctel = st.text_input("Telefono")
-            cemail = st.text_input("Email")
-            cpec = st.text_input("PEC")
-            cindirizzo = st.text_input("Indirizzo")
-            cpiva = st.text_input("Partita IVA")
-            cnote = st.text_area("Note")
-            if st.form_submit_button("Salva Cliente") and cnome:
-                with get_connection() as conn:
-                    conn.execute("INSERT INTO clienti (nome, telefono, email, pec, indirizzo, piva, note) VALUES (?,?,?,?,?,?,?)", (cnome, ctel, cemail, cpec, cindirizzo, cpiva, cnote))
-                    conn.commit()
-                st.success("Cliente aggiunto!")
-                st.rerun()
+    st.info("✏️ Puoi modificare direttamente i campi cliccando sulle celle della tabella sottostante o aggiungere nuove righe in fondo. Clicca il pulsante per salvare.")
+    
     with get_connection() as conn:
         df_clienti = pd.read_sql("SELECT * FROM clienti", conn)
-    st.dataframe(df_clienti, use_container_width=True)
+    
+    edited_clienti = st.data_editor(df_clienti, num_rows="dynamic", key="editor_clienti", use_container_width=True)
+    
+    if st.button("💾 Salva Modifiche Clienti"):
+        with get_connection() as conn:
+            conn.execute("DELETE FROM clienti")
+            edited_clienti.to_sql("clienti", conn, if_exists="append", index=False)
+            conn.commit()
+        st.success("Anagrafica clienti aggiornata con successo!")
+        st.rerun()
 
-# --- TAB MATERIALI ---
+# --- TAB MATERIALI (Modificabile direttamente) ---
 with tab_mat:
     st.subheader("Listino Materiali")
-    with st.expander("➕ Aggiungi / Modifica Materiale"):
-        with st.form("form_mat"):
-            m_cod = st.text_input("Codice", "MAT-005")
-            m_nome = st.text_input("Nome Materiale*")
-            m_prezzo = st.number_input("Prezzo Acquisto (€)", min_value=0.0, value=10.0)
-            m_unita = st.text_input("U.M. (es. m², m, pz, kg)", "m²")
-            m_sfrido = st.number_input("Sfrido %", value=10.0)
-            if st.form_submit_button("Salva Materiale") and m_nome:
-                with get_connection() as conn:
-                    conn.execute("INSERT OR REPLACE INTO materiali (codice, nome, prezzo, unita, sfrido) VALUES (?,?,?,?,?)", (m_cod, m_nome, m_prezzo, m_unita, m_sfrido))
-                    conn.commit()
-                st.success("Materiale salvato nel listino!")
-                st.rerun()
+    st.info("✏️ Modifica i prezzi, i nomi, le unità di misura o lo sfrido direttamente nella tabella. Puoi anche aggiungere o rimuovere materiali.")
+    
     with get_connection() as conn:
         df_mat = pd.read_sql("SELECT * FROM materiali", conn)
-    st.dataframe(df_mat, use_container_width=True)
+        
+    edited_mat = st.data_editor(df_mat, num_rows="dynamic", key="editor_mat", use_container_width=True)
+    
+    if st.button("💾 Salva Modifiche Materiali"):
+        with get_connection() as conn:
+            conn.execute("DELETE FROM materiali")
+            edited_mat.to_sql("materiali", conn, if_exists="append", index=False)
+            conn.commit()
+        st.success("Listino materiali aggiornato con successo!")
+        st.rerun()
 
-# --- TAB LAVORAZIONI ---
+# --- TAB LAVORAZIONI (Modificabile direttamente) ---
 with tab_lav:
     st.subheader("Listino Lavorazioni Laboratorio")
-    with st.expander("➕ Aggiungi / Modifica Lavorazione"):
-        with st.form("form_lav"):
-            l_cod = st.text_input("Codice", "LAV-005")
-            l_nome = st.text_input("Nome Lavorazione*")
-            l_costo = st.number_input("Costo Orario (€/h)", min_value=0.0, value=40.0)
-            l_unita = st.text_input("U.M. (es. h, m², pz)", "h")
-            l_ore = st.number_input("Ore per U.M.", value=1.0)
-            if st.form_submit_button("Salva Lavorazione") and l_nome:
-                with get_connection() as conn:
-                    conn.execute("INSERT OR REPLACE INTO lavorazioni (codice, nome, costo_orario, unita, ore_um) VALUES (?,?,?,?,?)", (l_cod, l_nome, l_costo, l_unita, l_ore))
-                    conn.commit()
-                st.success("Lavorazione salvata nel listino!")
-                st.rerun()
+    st.info("✏️ Modifica i costi orari, le unità di misura o le ore stimate direttamente nella tabella.")
+    
     with get_connection() as conn:
         df_lav = pd.read_sql("SELECT * FROM lavorazioni", conn)
-    st.dataframe(df_lav, use_container_width=True)
+        
+    edited_lav = st.data_editor(df_lav, num_rows="dynamic", key="editor_lav", use_container_width=True)
+    
+    if st.button("💾 Salva Modifiche Lavorazioni"):
+        with get_connection() as conn:
+            conn.execute("DELETE FROM lavorazioni")
+            edited_lav.to_sql("lavorazioni", conn, if_exists="append", index=False)
+            conn.commit()
+        st.success("Listino lavorazioni aggiornato con successo!")
+        st.rerun()
 
 # --- TAB IMPOSTAZIONI ---
 with tab_imp:
