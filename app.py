@@ -237,59 +237,182 @@ with tab_prev:
     else:
         st.info("Nessun preventivo salvato.")
 
-# --- TAB CLIENTI (Modificabile direttamente) ---
+# --- TAB CLIENTI (ID cliccabili ed esplodibili) ---
 with tab_cli:
     st.subheader("Anagrafica Clienti")
-    st.info("✏️ Puoi modificare direttamente i campi cliccando sulle celle della tabella sottostante o aggiungere nuove righe in fondo. Clicca il pulsante per salvare.")
+    
+    with st.expander("➕ Aggiungi Nuovo Cliente"):
+        with st.form("form_nuovo_cliente"):
+            cnome = st.text_input("Nome Cliente*")
+            ctel = st.text_input("Telefono")
+            cemail = st.text_input("Email")
+            cpec = st.text_input("PEC")
+            cindirizzo = st.text_input("Indirizzo")
+            cpiva = st.text_input("Partita IVA")
+            cnote = st.text_area("Note")
+            if st.form_submit_button("Crea Cliente") and cnome:
+                with get_connection() as conn:
+                    conn.execute("INSERT INTO clienti (nome, telefono, email, pec, indirizzo, piva, note) VALUES (?,?,?,?,?,?,?)", (cnome, ctel, cemail, cpec, cindirizzo, cpiva, cnote))
+                    conn.commit()
+                st.success("Cliente aggiunto!")
+                st.rerun()
+
+    st.markdown("---")
+    st.markdown("### Elenco Clienti Esistenti (Clicca sull'ID per esplodere e modificare)")
     
     with get_connection() as conn:
         df_clienti = pd.read_sql("SELECT * FROM clienti", conn)
-    
-    edited_clienti = st.data_editor(df_clienti, num_rows="dynamic", key="editor_clienti", use_container_width=True)
-    
-    if st.button("💾 Salva Modifiche Clienti"):
-        with get_connection() as conn:
-            conn.execute("DELETE FROM clienti")
-            edited_clienti.to_sql("clienti", conn, if_exists="append", index=False)
-            conn.commit()
-        st.success("Anagrafica clienti aggiornata con successo!")
-        st.rerun()
+        
+    if df_clienti.empty:
+        st.info("Nessun cliente inserito.")
+    else:
+        for _, row in df_clienti.iterrows():
+            cid = row["id"]
+            cname = row["nome"]
+            with st.expander(f"🆔 ID {cid} — {cname}"):
+                with st.form(f"form_edit_cliente_{cid}"):
+                    e_nome = st.text_input("Nome Cliente*", value=row["nome"], key=f"cn_{cid}")
+                    e_tel = st.text_input("Telefono", value=str(row["telefono"] or ""), key=f"ct_{cid}")
+                    e_email = st.text_input("Email", value=str(row["email"] or ""), key=f"ce_{cid}")
+                    e_pec = st.text_input("PEC", value=str(row["pec"] or ""), key=f"cp_{cid}")
+                    e_indirizzo = st.text_input("Indirizzo", value=str(row["indirizzo"] or ""), key=f"ci_{cid}")
+                    e_piva = st.text_input("Partita IVA", value=str(row["piva"] or ""), key=f"cpi_{cid}")
+                    e_note = st.text_area("Note", value=str(row["note"] or ""), key=f"cnt_{cid}")
+                    
+                    col_upd, col_del = st.columns(2)
+                    aggiorna = col_upd.form_submit_button("💾 Salva Modifiche")
+                    elimina = col_del.form_submit_button("🗑️ Elimina Record")
+                    
+                    if aggiorna:
+                        with get_connection() as conn:
+                            conn.execute("""
+                                UPDATE clienti SET nome=?, telefono=?, email=?, pec=?, indirizzo=?, piva=?, note=? WHERE id=?
+                            """, (e_nome, e_tel, e_email, e_pec, e_indirizzo, e_piva, e_note, cid))
+                            conn.commit()
+                        st.success(f"Cliente #{cid} aggiornato con successo!")
+                        st.rerun()
+                    if elimina:
+                        with get_connection() as conn:
+                            conn.execute("DELETE FROM clienti WHERE id=?", (cid,))
+                            conn.commit()
+                        st.warning(f"Cliente #{cid} eliminato!")
+                        st.rerun()
 
-# --- TAB MATERIALI (Modificabile direttamente) ---
+# --- TAB MATERIALI (ID cliccabili ed esplodibili) ---
 with tab_mat:
     st.subheader("Listino Materiali")
-    st.info("✏️ Modifica i prezzi, i nomi, le unità di misura o lo sfrido direttamente nella tabella. Puoi anche aggiungere o rimuovere materiali.")
+    
+    with st.expander("➕ Aggiungi Nuovo Materiale"):
+        with st.form("form_nuovo_mat"):
+            m_cod = st.text_input("Codice", "MAT-00X")
+            m_nome = st.text_input("Nome Materiale*")
+            m_prezzo = st.number_input("Prezzo Acquisto (€)", min_value=0.0, value=10.0)
+            m_unita = st.text_input("U.M. (es. m², m, pz, kg)", "m²")
+            m_sfrido = st.number_input("Sfrido %", value=10.0)
+            if st.form_submit_button("Crea Materiale") and m_nome:
+                with get_connection() as conn:
+                    conn.execute("INSERT INTO materiali (codice, nome, prezzo, unita, sfrido) VALUES (?,?,?,?,?)", (m_cod, m_nome, m_prezzo, m_unita, m_sfrido))
+                    conn.commit()
+                st.success("Materiale aggiunto!")
+                st.rerun()
+
+    st.markdown("---")
+    st.markdown("### Elenco Materiali Esistenti (Clicca sull'ID per esplodere e modificare)")
     
     with get_connection() as conn:
         df_mat = pd.read_sql("SELECT * FROM materiali", conn)
         
-    edited_mat = st.data_editor(df_mat, num_rows="dynamic", key="editor_mat", use_container_width=True)
-    
-    if st.button("💾 Salva Modifiche Materiali"):
-        with get_connection() as conn:
-            conn.execute("DELETE FROM materiali")
-            edited_mat.to_sql("materiali", conn, if_exists="append", index=False)
-            conn.commit()
-        st.success("Listino materiali aggiornato con successo!")
-        st.rerun()
+    if df_mat.empty:
+        st.info("Nessun materiale inserito.")
+    else:
+        for _, row in df_mat.iterrows():
+            mid = row["id"]
+            mname = row["nome"]
+            mcode = row["codice"]
+            with st.expander(f"🆔 ID {mid} — [{mcode}] {mname}"):
+                with st.form(f"form_edit_mat_{mid}"):
+                    e_cod = st.text_input("Codice", value=str(row["codice"] or ""), key=f"mc_{mid}")
+                    e_nome = st.text_input("Nome Materiale*", value=str(row["nome"] or ""), key=f"mn_{mid}")
+                    e_prezzo = st.number_input("Prezzo Acquisto (€)", min_value=0.0, value=float(row["prezzo"]), key=f"mp_{mid}")
+                    e_unita = st.text_input("U.M.", value=str(row["unita"] or ""), key=f"mu_{mid}")
+                    e_sfrido = st.number_input("Sfrido %", value=float(row["sfrido"]), key=f"ms_{mid}")
+                    
+                    col_upd, col_del = st.columns(2)
+                    aggiorna = col_upd.form_submit_button("💾 Salva Modifiche")
+                    elimina = col_del.form_submit_button("🗑️ Elimina Record")
+                    
+                    if aggiorna:
+                        with get_connection() as conn:
+                            conn.execute("""
+                                UPDATE materiali SET codice=?, nome=?, prezzo=?, unita=?, sfrido=? WHERE id=?
+                            """, (e_cod, e_nome, e_prezzo, e_unita, e_sfrido, mid))
+                            conn.commit()
+                        st.success(f"Materiale #{mid} aggiornato!")
+                        st.rerun()
+                    if elimina:
+                        with get_connection() as conn:
+                            conn.execute("DELETE FROM materiali WHERE id=?", (mid,))
+                            conn.commit()
+                        st.warning(f"Materiale #{mid} eliminato!")
+                        st.rerun()
 
-# --- TAB LAVORAZIONI (Modificabile direttamente) ---
+# --- TAB LAVORAZIONI (ID cliccabili ed esplodibili) ---
 with tab_lav:
     st.subheader("Listino Lavorazioni Laboratorio")
-    st.info("✏️ Modifica i costi orari, le unità di misura o le ore stimate direttamente nella tabella.")
+    
+    with st.expander("➕ Aggiungi Nuova Lavorazione"):
+        with st.form("form_nuova_lav"):
+            l_cod = st.text_input("Codice", "LAV-00X")
+            l_nome = st.text_input("Nome Lavorazione*")
+            l_costo = st.number_input("Costo Orario (€/h)", min_value=0.0, value=40.0)
+            l_unita = st.text_input("U.M. (es. h, m², pz)", "h")
+            l_ore = st.number_input("Ore per U.M.", value=1.0)
+            if st.form_submit_button("Crea Lavorazione") and l_nome:
+                with get_connection() as conn:
+                    conn.execute("INSERT INTO lavorazioni (codice, nome, costo_orario, unita, ore_um) VALUES (?,?,?,?,?)", (l_cod, l_nome, l_costo, l_unita, l_ore))
+                    conn.commit()
+                st.success("Lavorazione aggiunta!")
+                st.rerun()
+
+    st.markdown("---")
+    st.markdown("### Elenco Lavorazioni Esistenti (Clicca sull'ID per esplodere e modificare)")
     
     with get_connection() as conn:
         df_lav = pd.read_sql("SELECT * FROM lavorazioni", conn)
         
-    edited_lav = st.data_editor(df_lav, num_rows="dynamic", key="editor_lav", use_container_width=True)
-    
-    if st.button("💾 Salva Modifiche Lavorazioni"):
-        with get_connection() as conn:
-            conn.execute("DELETE FROM lavorazioni")
-            edited_lav.to_sql("lavorazioni", conn, if_exists="append", index=False)
-            conn.commit()
-        st.success("Listino lavorazioni aggiornato con successo!")
-        st.rerun()
+    if df_lav.empty:
+        st.info("Nessuna lavorazione inserita.")
+    else:
+        for _, row in df_lav.iterrows():
+            lid = row["id"]
+            lname = row["nome"]
+            lcode = row["codice"]
+            with st.expander(f"🆔 ID {lid} — [{lcode}] {lname}"):
+                with st.form(f"form_edit_lav_{lid}"):
+                    e_cod = st.text_input("Codice", value=str(row["codice"] or ""), key=f"lc_{lid}")
+                    e_nome = st.text_input("Nome Lavorazione*", value=str(row["nome"] or ""), key=f"ln_{lid}")
+                    e_costo = st.number_input("Costo Orario (€/h)", min_value=0.0, value=float(row["costo_orario"]), key=f"lco_{lid}")
+                    e_unita = st.text_input("U.M.", value=str(row["unita"] or ""), key=f"lu_{lid}")
+                    e_ore = st.number_input("Ore per U.M.", value=float(row["ore_um"]), key=f"lor_{lid}")
+                    
+                    col_upd, col_del = st.columns(2)
+                    aggiorna = col_upd.form_submit_button("💾 Salva Modifiche")
+                    elimina = col_del.form_submit_button("🗑️ Elimina Record")
+                    
+                    if aggiorna:
+                        with get_connection() as conn:
+                            conn.execute("""
+                                UPDATE lavorazioni SET codice=?, nome=?, costo_orario=?, unita=?, ore_um=? WHERE id=?
+                            """, (e_cod, e_nome, e_costo, e_unita, e_ore, lid))
+                            conn.commit()
+                        st.success(f"Lavorazione #{lid} aggiornata!")
+                        st.rerun()
+                    if elimina:
+                        with get_connection() as conn:
+                            conn.execute("DELETE FROM lavorazioni WHERE id=?", (lid,))
+                            conn.commit()
+                        st.warning(f"Lavorazione #{lid} eliminata!")
+                        st.rerun()
 
 # --- TAB IMPOSTAZIONI ---
 with tab_imp:
