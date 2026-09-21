@@ -4,11 +4,8 @@ import datetime
 import os
 import sqlite3
 
-st.set_page_config(page_title="Gestionale Scenografia", page_icon="🎬", layout="wide")
+st.set_page_config(page_title="Gestionale Preventivi Scenografici", page_icon="🎬", layout="wide")
 
-# ==============================================================================
-# DATABASE MANAGER
-# ==============================================================================
 DB_PATH = "gestionale_scenografia.db"
 
 def get_connection():
@@ -25,8 +22,13 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS voci_preventivo (id INTEGER PRIMARY KEY AUTOINCREMENT, preventivo_id INTEGER, tipo TEXT, nome TEXT, qta REAL, um TEXT, ore REAL, costo_base REAL, prezzo_vendita REAL)''')
         conn.commit()
     
-    # Default settings
-    defaults = {"iva": 22.0, "sfrido_generale": 10.0, "ricarico_materiali": 35.0, "ricarico_manodopera": 25.0, "spese_generali": 20.0, "markup_finale": 30.0, "costo_km": 0.90, "paga_falegname": 40.0}
+    defaults = {
+        "iva": 22.0, "sfrido_generale": 10.0, "ricarico_materiali": 35.0,
+        "ricarico_manodopera": 25.0, "spese_generali": 20.0, "markup_finale": 30.0,
+        "costo_km": 0.90, "paga_falegname": 40.0, "paga_fabbro": 45.0,
+        "paga_pittore": 40.0, "paga_elettricista": 40.0,
+        "paga_amministrazione": 25.0, "paga_titolare": 40.0
+    }
     with get_connection() as conn:
         c = conn.cursor()
         for k, v in defaults.items():
@@ -41,9 +43,6 @@ def get_imp():
         c.execute("SELECT chiave, valore FROM impostazioni")
         return dict(c.fetchall())
 
-# ==============================================================================
-# INTERFACCIA STREAMLIT (TABS)
-# ==============================================================================
 st.title("🎬 Gestionale Preventivi Scenografici")
 
 tab_dash, tab_prev, tab_cli, tab_mat, tab_lav, tab_imp = st.tabs(["📊 Dashboard", "📋 Preventivi", "👥 Clienti", "📦 Materiali", "🛠️ Lavorazioni", "⚙️ Impostazioni"])
@@ -71,7 +70,137 @@ with tab_dash:
         st.markdown("### 🗓️ Prossimi Cantieri in Consegna")
         st.dataframe(df_prev[["id", "titolo", "cliente", "data_consegna", "stato", "ivato"]], use_container_width=True)
     else:
-        st.info("Nessun preventivo inserito. Vai nella sezione Preventivi per crearne uno!")
+        st.info("Nessun preventivo inserito.")
+
+    with st.expander("ℹ️ Guida Indicatori"):
+        st.markdown("""
+        * **Tasso di Conversione:** Percentuale di preventivi approvati sul totale.
+        * **Fatturato Pipeline:** Somma degli imponibili di tutti i preventivi.
+        * **Margine Medio Reale:** Guadagno percentuale effettivo rispetto ai costi.
+        """)
+
+# --- TAB PREVENTIVI ---
+with tab_prev:
+    st.subheader("Gestione Preventivi")
+    
+    with st.expander("➕ Crea Nuovo Preventivo"):
+        with get_connection() as conn:
+            c = conn.cursor()
+            c.execute("SELECT nome FROM clienti")
+            clienti = [r[0] for r in c.fetchall()]
+            c.execute("SELECT nome, prezzo, unita, sfrido FROM materiali")
+            l_mat = c.fetchall()
+            c.execute("SELECT nome, costo_orario, unita, ore_um FROM lavorazioni")
+            l_lav = c.fetchall()
+
+        if not clienti:
+            st.warning("⚠️ Prima di creare un preventivo, inserisci almeno un cliente nella sezione 'Clienti'.")
+        else:
+            p_titolo = st.text_input("Titolo Progetto*")
+            p_cliente = st.selectbox("Cliente*", clienti)
+            
+            c_i1, c_i2 = st.columns(2)
+            p_inizio = c_i1.text_input("Inizio Lavori", datetime.date.today().strftime("%d/%m/%Y"))
+            p_consegna = c_i2.text_input("Consegna", (datetime.date.today() + datetime.timedelta(days=15)).strftime("%d/%m/%Y"))
+
+            st.markdown("#### Voci del Preventivo")
+            if "voci_temp" not in st.session_state:
+                st.session_state.voci_temp = []
+
+            # Aggiunta Materiale
+            col_m1, col_m2, col_m3 = st.columns([3, 1, 1])
+            sel_mat = col_m1.selectbox("Seleziona Materiale", [m[0] for m in l_mat] if l_mat else ["Nessun materiale"])
+            qta_mat = col_m2.number_input("Q.tà Mat.", min_value=0.1, value=1.0)
+            if col_m3.button("Aggiungi Materiale") and l_mat:
+                m_obj = next((m for m in l_mat if m[0] == sel_mat), None)
+                if m_obj:
+                    costo = m_obj[1] * qta_mat * (1 + m_obj[3]/100.0)
+                    imp_val = get_imp()
+                    vendita = costo * (1 + imp_val.get("ricarico_materiali", 35)/100.0)
+                    st.session_state.voci_temp.append({"tipo": "Materiale", "nome": m_obj[0], "qta": qta_mat, "um": m_obj[2], "ore": 0.0, "costo_base": costo, "prezzo": vendita})
+                    st.success(f"Aggiunto: {m_obj[0]}")
+
+            # Aggiunta Lavorazione
+            col_l1, col_l2, col_l3, col_l4 = st.columns([2, 1, 1, 1])
+            sel_lav = col_l1.selectbox("Seleziona Lavorazione", [l[0] for l in l_lav] if l_lav else ["Nessuna lavorazione"])
+            qta_lav = col_l2.number_input("Q.tà Lav.", min_value=0.1, value=1.0)
+            ore_lav = col_l3.number_input("Ore stimate", min_value=0.1, value=1.0)
+            if col_l4.button("Aggiungi Lav.") and l_lav:
+                l_obj = next((l for l in l_lav if l[0] == sel_lav), None)
+                if l_obj:
+                    costo = ore_lav * l_obj[1]
+                    imp_val = get_imp()
+                    vendita = costo * (1 + imp_val.get("ricarico_manodopera", 25)/100.0)
+                    st.session_state.voci_temp.append({"tipo": "Lavorazione", "nome": l_obj[0], "qta": qta_lav, "um": l_obj[2], "ore": ore_lav, "costo_base": costo, "prezzo": vendita})
+                    st.success(f"Aggiunta lavorazione: {l_obj[0]}")
+
+            if st.session_state.voci_temp:
+                st.dataframe(pd.DataFrame(st.session_state.voci_temp), use_container_width=True)
+                if st.button("🗑️ Svuota Voci"):
+                    st.session_state.voci_temp = []
+                    st.rerun()
+
+            st.markdown("#### Cantiere & Logistica")
+            c_ext1, c_ext2 = st.columns(2)
+            ore_falegname = c_ext1.number_input("Ore Falegname in Cantiere", min_value=0.0, value=0.0)
+            km_trasporto = c_ext2.number_input("Km Trasporto A/R", min_value=0.0, value=0.0)
+
+            if st.button("💾 Calcola e Salva Preventivo Definitivo"):
+                if not p_titolo:
+                    st.error("Inserisci il titolo del progetto.")
+                else:
+                    imp = get_imp()
+                    voci = st.session_state.voci_temp
+                    
+                    c_mat = sum(v["costo_base"] for v in voci if v["tipo"] == "Materiale")
+                    v_mat = sum(v["prezzo"] for v in voci if v["tipo"] == "Materiale")
+                    c_lav = sum(v["costo_base"] for v in voci if v["tipo"] == "Lavorazione")
+                    v_lav = sum(v["prezzo"] for v in voci if v["tipo"] == "Lavorazione")
+
+                    c_fal = ore_falegname * imp.get("paga_falegname", 40)
+                    v_fal = c_fal * (1 + imp.get("ricarico_manodopera", 25)/100.0)
+
+                    c_tr = km_trasporto * imp.get("costo_km", 0.90)
+                    markup = 1 + (imp.get("markup_finale", 30)/100.0)
+                    v_tr = c_tr * markup
+
+                    c_dir = c_mat + c_lav + c_fal + c_tr
+                    c_aziendale = c_dir * (1 + imp.get("spese_generali", 20)/100.0)
+
+                    v_base = v_mat + v_lav + v_fal + v_tr
+                    imponibile = v_base * markup
+                    iva = imponibile * (imp.get("iva", 22)/100.0)
+                    ivato = imponibile + iva
+
+                    with get_connection() as conn:
+                        cursor = conn.cursor()
+                        cursor.execute("""
+                            INSERT INTO preventivi (titolo, cliente, costo_diretto, imponibile, iva, ivato, km_trasporto, costo_trasporto, stato, data_inizio, data_consegna)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Bozza', ?, ?)
+                        """, (p_titolo, p_cliente, c_aziendale, imponibile, iva, ivato, km_trasporto, c_tr, p_inizio, p_consegna))
+                        pid = cursor.lastrowid
+
+                        for v in voci:
+                            cursor.execute("INSERT INTO voci_preventivo (preventivo_id, tipo, nome, qta, um, ore, costo_base, prezzo_vendita) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                      (pid, v["tipo"], v["nome"], v["qta"], v["um"], v["ore"], v["costo_base"], v["prezzo"]))
+                        if ore_falegname > 0:
+                            cursor.execute("INSERT INTO voci_preventivo (preventivo_id, tipo, nome, qta, um, ore, costo_base, prezzo_vendita) VALUES (?, ?, 'Installazione / Falegname', ?, 'h', ?, ?, ?)",
+                                      (pid, "Manodopera Cantiere", ore_falegname, ore_falegname, c_fal, v_fal * markup))
+                        if km_trasporto > 0:
+                            cursor.execute("INSERT INTO voci_preventivo (preventivo_id, tipo, nome, qta, um, ore, costo_base, prezzo_vendita) VALUES (?, ?, 'Trasporto e Logistica A/R', ?, 'km', 0, ?, ?)",
+                                      (pid, "Logistica", km_trasporto, c_tr, v_tr))
+                        conn.commit()
+
+                    st.session_state.voci_temp = []
+                    st.success(f"Preventivo #{pid} salvato con successo!")
+                    st.rerun()
+
+    with get_connection() as conn:
+        df_p = pd.read_sql("SELECT id, titolo, cliente, imponibile, ivato, stato, data_consegna FROM preventivi ORDER BY id DESC", conn)
+    if not df_p.empty:
+        st.dataframe(df_p, use_container_width=True)
+    else:
+        st.info("Nessun preventivo salvato.")
 
 # --- TAB CLIENTI ---
 with tab_cli:
@@ -85,22 +214,19 @@ with tab_cli:
             cindirizzo = st.text_input("Indirizzo")
             cpiva = st.text_input("Partita IVA")
             cnote = st.text_area("Note")
-            submitted = st.form_submit_button("Salva Cliente")
-            if submitted and cnome:
+            if st.form_submit_button("Salva Cliente") and cnome:
                 with get_connection() as conn:
                     conn.execute("INSERT INTO clienti (nome, telefono, email, pec, indirizzo, piva, note) VALUES (?,?,?,?,?,?,?)", (cnome, ctel, cemail, cpec, cindirizzo, cpiva, cnote))
                     conn.commit()
-                st.success("Cliente aggiunto con successo!")
+                st.success("Cliente aggiunto!")
                 st.rerun()
-
     with get_connection() as conn:
-        df_cli = pd.read_sql("SELECT * FROM clienti", conn)
-    st.dataframe(df_cli, use_container_width=True)
+        st.dataframe(pd.read_sql("SELECT * FROM clienti", conn), use_container_width=True)
 
 # --- TAB MATERIALI ---
 with tab_mat:
     st.subheader("Listino Materiali")
-    with st.expander("➕ Aggiungi Nuovo Materiale"):
+    with st.expander("➕ Aggiungi Materiale"):
         with st.form("form_mat"):
             m_cod = st.text_input("Codice", "MAT-001")
             m_nome = st.text_input("Nome Materiale*")
@@ -119,7 +245,7 @@ with tab_mat:
 # --- TAB LAVORAZIONI ---
 with tab_lav:
     st.subheader("Listino Lavorazioni Laboratorio")
-    with st.expander("➕ Aggiungi Nuova Lavorazione"):
+    with st.expander("➕ Aggiungi Lavorazione"):
         with st.form("form_lav"):
             l_cod = st.text_input("Codice", "LAV-001")
             l_nome = st.text_input("Nome Lavorazione*")
@@ -149,13 +275,3 @@ with tab_imp:
                     conn.execute("UPDATE impostazioni SET valore=? WHERE chiave=?", (v, k))
                 conn.commit()
             st.success("Impostazioni aggiornate!")
-
-# --- TAB PREVENTIVI ---
-with tab_prev:
-    st.subheader("Gestione Preventivi")
-    with get_connection() as conn:
-        df_p = pd.read_sql("SELECT id, titolo, cliente, imponibile, ivato, stato, data_consegna FROM preventivi", conn)
-    if not df_p.empty:
-        st.dataframe(df_p, use_container_width=True)
-    else:
-        st.info("Nessun preventivo presente.")
