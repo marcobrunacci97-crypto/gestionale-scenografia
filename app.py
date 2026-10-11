@@ -1,57 +1,212 @@
-
+import datetime
+import hmac
+import io
 import os
+import re
 import shutil
 import sqlite3
-import datetime
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
-import pandas as pd
+from contextlib import contextmanager
+from xml.sax.saxutils import escape
 
-# Importazione di ReportLab per la generazione PDF professionale
+import pandas as pd
+import streamlit as st
+
 try:
-    from reportlab.lib.pagesizes import A4
-    from reportlab.pdfgen import canvas
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
     REPORTLAB_AVAILABLE = True
-except ImportError:
+except ImportError:  # il PDF viene disattivato, il resto dell'app funziona
     REPORTLAB_AVAILABLE = False
 
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.environ.get("GESTIONALE_DB", os.path.join(BASE_DIR, "gestionale_scenografia.db"))
+BACKUP_DIR = os.path.join(os.path.dirname(DB_PATH), "backups")
+LISTINO_XLSX = os.path.join(BASE_DIR, "Listino_Allestimenti_Scenografici.xlsx")
+MAX_BACKUP_LOCALI = 20
+
+STATI = ["Bozza", "Inviato", "Approvato", "Rifiutato", "In Lavorazione", "Completato"]
+STATI_VINTI = ("Approvato", "In Lavorazione", "Completato")
+
+TIPO_MATERIALE = "Materiale"
+TIPO_LAVORAZIONE = "Lavorazione"
+TIPO_OPERATORI = "Manodopera / Operatori"
+TIPO_LOGISTICA = "Logistica"
+
+# (chiave, etichetta, nome della voce nel preventivo, chiave della paga oraria, paga di default)
+RUOLI = [
+    ("falegname", "Falegname", "Falegname (Cantiere/Opera)", "paga_falegname", 40.0),
+    ("fabbro", "Fabbro", "Fabbro (Cantiere/Opera)", "paga_fabbro", 45.0),
+    ("pittore", "Pittore", "Pittore (Cantiere/Opera)", "paga_pittore", 40.0),
+    ("elettricista", "Elettricista", "Elettricista (Cantiere/Opera)", "paga_elettricista", 40.0),
+    ("amministrazione", "Amministrazione", "Amministrazione", "paga_amministrazione", 25.0),
+    ("titolare", "Titolare / Direzione", "Titolare / Direzione", "paga_titolare", 40.0),
+]
+
+IMPOSTAZIONI_DEFAULT = {
+    "iva": (22.0, "%"),
+    "sfrido_generale": (10.0, "%"),
+    "ricarico_materiali": (35.0, "%"),
+    "ricarico_manodopera": (25.0, "%"),
+    "spese_generali": (20.0, "%"),
+    "markup_finale": (30.0, "%"),
+    "costo_km": (0.90, "€/km"),
+    "paga_falegname": (40.0, "€/h"),
+    "paga_fabbro": (45.0, "€/h"),
+    "paga_pittore": (40.0, "€/h"),
+    "paga_elettricista": (40.0, "€/h"),
+    "paga_amministrazione": (25.0, "€/h"),
+    "paga_titolare": (40.0, "€/h"),
+}
+
+PAGINA_DASHBOARD = "📊 Dashboard"
+PAGINA_PREVENTIVI = "📋 Preventivi"
+PAGINA_COMPOSER = "📝 Nuovo preventivo"
+PAGINA_CLIENTI = "👥 Clienti"
+PAGINA_MATERIALI = "📦 Materiali"
+PAGINA_LAVORAZIONI = "🛠️ Lavorazioni"
+PAGINA_IMPOSTAZIONI = "⚙️ Impostazioni"
+PAGINA_DATI = "💾 Dati e backup"
+PAGINE = [
+    PAGINA_DASHBOARD, PAGINA_PREVENTIVI, PAGINA_COMPOSER, PAGINA_CLIENTI,
+    PAGINA_MATERIALI, PAGINA_LAVORAZIONI, PAGINA_IMPOSTAZIONI, PAGINA_DATI,
+]
+
+
 # ==============================================================================
-# 1. DATABASE MANAGER
+# UTILITÀ
+# ==============================================================================
+def eur(valore):
+    """Formatta un importo all'italiana: 1.234,56 €"""
+    try:
+        testo = f"{float(valore):,.2f}"
+    except (TypeError, ValueError):
+        testo = "0.00"
+    return "€ " + testo.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def num(valore):
+    """Numero senza zeri inutili (2.0 -> 2, 2.5 -> 2.5)."""
+    try:
+        return f"{float(valore):g}"
+    except (TypeError, ValueError):
+        return str(valore)
+
+
+def parse_data(valore):
+    """Accetta date ISO (2026-10-11) o italiane (11/10/2026). Ritorna date o None."""
+    if not valore:
+        return None
+    if isinstance(valore, datetime.datetime):
+        return valore.date()
+    if isinstance(valore, datetime.date):
+        return valore
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.datetime.strptime(str(valore).strip()[:10], fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def fmt_data(valore):
+    d = parse_data(valore)
+    return d.strftime("%d/%m/%Y") if d else "-"
+
+
+def nome_file_sicuro(testo):
+    return re.sub(r"[^\w\-]+", "_", str(testo)).strip("_") or "preventivo"
+
+
+# ==============================================================================
+# 1. DATABASE
 # ==============================================================================
 class DatabaseManager:
-    def __init__(self, db_path="gestionale_scenografia.db"):
+    def __init__(self, db_path=DB_PATH):
         self.db_path = db_path
-        self.esegui_backup_automatico()
+        os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+        self.backup_automatico()
         self.init_db()
+        self.importa_listino_se_vuoto()
 
-    def get_connection(self):
-        return sqlite3.connect(self.db_path)
-
-    def esegui_backup_automatico(self):
-        if os.path.exists(self.db_path):
-            backup_dir = "backups"
-            os.makedirs(backup_dir, exist_ok=True)
-            data_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_file = os.path.join(backup_dir, f"gestionale_backup_{data_str}.db")
-            try:
-                shutil.copy2(self.db_path, backup_file)
-            except Exception as e:
-                print(f"[BACKUP] Errore: {e}")
-
-    def ripristina_backup(self, filepath_backup):
+    # ---- accesso ----------------------------------------------------------
+    @contextmanager
+    def conn(self):
+        con = sqlite3.connect(self.db_path)
+        con.row_factory = sqlite3.Row
+        con.execute("PRAGMA foreign_keys = ON")  # necessario per ON DELETE CASCADE
         try:
-            shutil.copy2(filepath_backup, self.db_path)
-            return True
-        except Exception as e:
-            return False
+            yield con
+            con.commit()
+        except Exception:
+            con.rollback()
+            raise
+        finally:
+            con.close()
 
+    def query(self, sql, params=()):
+        with self.conn() as con:
+            return [dict(r) for r in con.execute(sql, params).fetchall()]
+
+    def execute(self, sql, params=()):
+        with self.conn() as con:
+            return con.execute(sql, params).lastrowid
+
+    # ---- backup -----------------------------------------------------------
+    def backup_automatico(self):
+        if not os.path.exists(self.db_path):
+            return
+        try:
+            os.makedirs(BACKUP_DIR, exist_ok=True)
+            stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            shutil.copy2(self.db_path, os.path.join(BACKUP_DIR, f"gestionale_backup_{stamp}.db"))
+            vecchi = sorted(f for f in os.listdir(BACKUP_DIR) if f.endswith(".db"))
+            for f in vecchi[:-MAX_BACKUP_LOCALI]:
+                os.remove(os.path.join(BACKUP_DIR, f))
+        except Exception as e:  # il backup non deve mai bloccare l'app
+            print(f"[BACKUP] Errore: {e}")
+
+    def esporta_bytes(self):
+        """Copia coerente del database, da scaricare."""
+        try:
+            with self.conn() as con:
+                return con.serialize()
+        except Exception:
+            with open(self.db_path, "rb") as f:
+                return f.read()
+
+    def ripristina_da_bytes(self, dati):
+        """Sostituisce il database con quello caricato. Ritorna (ok, messaggio)."""
+        tmp = self.db_path + ".upload"
+        try:
+            with open(tmp, "wb") as f:
+                f.write(dati)
+            try:
+                con = sqlite3.connect(tmp)
+                tabelle = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                con.close()
+            except sqlite3.DatabaseError:
+                return False, "Il file caricato non è un database valido."
+            mancanti = {"preventivi", "voci_preventivo", "materiali", "clienti"} - tabelle
+            if mancanti:
+                return False, "Il file non sembra un database del gestionale (mancano: " + ", ".join(sorted(mancanti)) + ")."
+            self.backup_automatico()
+            os.replace(tmp, self.db_path)
+            self.init_db()
+            return True, "Database ripristinato."
+        except Exception as e:
+            return False, f"Errore durante il ripristino: {e}"
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+
+    # ---- struttura --------------------------------------------------------
     def init_db(self):
-        with self.get_connection() as conn:
-            c = conn.cursor()
+        with self.conn() as con:
+            c = con.cursor()
             c.execute('''
                 CREATE TABLE IF NOT EXISTS clienti (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -134,1070 +289,904 @@ class DatabaseManager:
                     FOREIGN KEY(preventivo_id) REFERENCES preventivi(id) ON DELETE CASCADE
                 )
             ''')
-
-            # Verifica e aggiunta colonna 'unita' se manca
             c.execute("PRAGMA table_info(impostazioni)")
-            cols = [col[1] for col in c.fetchall()]
-            if "unita" not in cols:
-                try:
-                    c.execute("ALTER TABLE impostazioni ADD COLUMN unita TEXT")
-                except Exception:
-                    pass
-
-            conn.commit()
-        self.popola_impostazioni_default()
-
-    def popola_impostazioni_default(self):
-        defaults = {
-            "iva": (22.0, "%"),
-            "sfrido_generale": (10.0, "%"),
-            "ricarico_materiali": (35.0, "%"),
-            "ricarico_manodopera": (25.0, "%"),
-            "spese_generali": (20.0, "%"),
-            "markup_finale": (30.0, "%"),
-            "costo_km": (0.90, "€/km"),
-            "paga_falegname": (40.0, "€/h"),
-            "paga_fabbro": (45.0, "€/h"),
-            "paga_pittore": (40.0, "€/h"),
-            "paga_elettricista": (40.0, "€/h"),
-            "paga_amministrazione": (25.0, "€/h"),
-            "paga_titolare": (40.0, "€/h")
-        }
-        with self.get_connection() as conn:
-            c = conn.cursor()
-            for key, (val, um) in defaults.items():
-                c.execute("INSERT OR IGNORE INTO impostazioni (chiave, valore, unita) VALUES (?, ?, ?)", (key, val, um))
-                c.execute("UPDATE impostazioni SET unita=? WHERE chiave=? AND (unita IS NULL OR unita='')", (um, key))
-            conn.commit()
-
-    def carica_da_excel_se_vuoto(self, file_path="Listino_Allestimenti_Scenografici.xlsx"):
-        if not os.path.exists(file_path):
-            return
-        with self.get_connection() as conn:
-            c = conn.cursor()
-            c.execute("SELECT COUNT(*) FROM materiali")
-            if c.fetchone()[0] == 0:
-                try:
-                    xls = pd.ExcelFile(file_path)
-                    if "Listino_Materiali" in xls.sheet_names:
-                        df_mat = pd.read_excel(xls, sheet_name="Listino_Materiali")
-                        for _, row in df_mat.iterrows():
-                            c.execute(
-                                "INSERT OR IGNORE INTO materiali (codice, nome, unita, prezzo, sfrido) VALUES (?, ?, ?, ?, ?)",
-                                (str(row.get("Codice", "")), str(row.get("Materiale", "")), str(row.get("U.M.", "pz")),
-                                 float(row.get("Costo acquisto (€)", 0.0)), float(row.get("Sfrido %", 0.10)) * 100)
-                            )
-                    if "Listino_Lavorazioni" in xls.sheet_names:
-                        df_lav = pd.read_excel(xls, sheet_name="Listino_Lavorazioni")
-                        for _, row in df_lav.iterrows():
-                            c.execute(
-                                "INSERT OR IGNORE INTO lavorazioni (codice, nome, unita, costo_orario, ore_um) VALUES (?, ?, ?, ?, ?)",
-                                (str(row.get("Codice", "")), str(row.get("Lavorazione", "")), str(row.get("U.M.", "m²")),
-                                 float(row.get("Costo orario (€)", 40.0)), float(row.get("Ore/U.M.", 1.0)))
-                            )
-                    conn.commit()
-                except Exception as e:
-                    print(f"Errore import: {e}")
-
-
-def parse_float_positivo(valore_str, nome_campo, consenti_zero=True):
-    val_clean = valore_str.strip().replace(",", ".")
-    if not val_clean:
-        raise ValueError(f"Il campo '{nome_campo}' non può essere vuoto.")
-    try:
-        val = float(val_clean)
-    except ValueError:
-        raise ValueError(f"Il valore in '{nome_campo}' non è un numero valido.")
-    if not consenti_zero and val <= 0:
-        raise ValueError(f"Il campo '{nome_campo}' deve essere maggiore di zero.")
-    if val < 0:
-        raise ValueError(f"Il campo '{nome_campo}' non può essere negativo.")
-    return val
-
-
-# ==============================================================================
-# 2. TAB CLIENTI
-# ==============================================================================
-class TabClienti(ttk.Frame):
-    def __init__(self, parent, db):
-        super().__init__(parent)
-        self.db = db
-        self.setup_ui()
-
-    def setup_ui(self):
-        frame_top = ttk.Frame(self)
-        frame_top.pack(fill="x", padx=10, pady=5)
-        ttk.Button(frame_top, text="+ Nuovo Cliente", command=self.modal_nuovo_cliente).pack(side="left", padx=5)
-        ttk.Button(frame_top, text="✏️ Modifica", command=self.modal_modifica_cliente).pack(side="left", padx=5)
-        ttk.Button(frame_top, text="🗑️ Elimina", command=self.elimina_cliente).pack(side="left", padx=5)
-
-        ttk.Label(frame_top, text="🔍 Cerca:").pack(side="left", padx=(20, 5))
-        self.e_ricerca = ttk.Entry(frame_top, width=25)
-        self.e_ricerca.pack(side="left", padx=5)
-        self.e_ricerca.bind("<KeyRelease>", lambda e: self.aggiorna_tabella())
-
-        cols = ("ID", "Nome", "Telefono", "Email", "PEC", "Indirizzo", "P.IVA", "Note")
-        self.tree = ttk.Treeview(self, columns=cols, show="headings")
-        for col in cols:
-            self.tree.heading(col, text=col)
-            self.tree.column(col, width=100 if col == "ID" else 130)
-        self.tree.pack(fill="both", expand=True, padx=10, pady=5)
-        self.aggiorna_tabella()
-
-    def aggiorna_tabella(self):
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        q = f"%{self.e_ricerca.get().strip()}%"
-        with self.db.get_connection() as conn:
-            c = conn.cursor()
-            c.execute("SELECT id, nome, telefono, email, pec, indirizzo, piva, note FROM clienti WHERE nome LIKE ? OR email LIKE ? OR piva LIKE ?", (q, q, q))
-            for row in c.fetchall():
-                self.tree.insert("", "end", values=row)
-
-    def modal_nuovo_cliente(self, cliente_id=None):
-        win = tk.Toplevel(self)
-        win.title("Gestione Cliente")
-        win.geometry("400x480")
-        fields = ["Nome (Obbligatorio)*", "Telefono", "Email", "PEC", "Indirizzo", "Partita IVA", "Note"]
-        entries = {}
-        c_data = {}
-        if cliente_id:
-            with self.db.get_connection() as conn:
-                c = conn.cursor()
-                c.execute("SELECT nome, telefono, email, pec, indirizzo, piva, note FROM clienti WHERE id=?", (cliente_id,))
-                row = c.fetchone()
-                if row:
-                    c_data = dict(zip(["nome", "telefono", "email", "pec", "indirizzo", "piva", "note"], row))
-        keys_map = {"Nome (Obbligatorio)*": "nome", "Telefono": "telefono", "Email": "email", "PEC": "pec", "Indirizzo": "indirizzo", "Partita IVA": "piva", "Note": "note"}
-
-        for f in fields:
-            ttk.Label(win, text=f).pack(anchor="w", padx=20, pady=(5, 0))
-            e = ttk.Entry(win, width=40)
-            if cliente_id and keys_map[f] in c_data:
-                e.insert(0, str(c_data[keys_map[f]] or ""))
-            e.pack(padx=20, pady=(0, 5))
-            entries[f] = e
-
-        def salva():
-            nome = entries["Nome (Obbligatorio)*"].get().strip()
-            if not nome:
-                messagebox.showerror("Errore", "Nome obbligatorio!")
-                return
-            with self.db.get_connection() as conn:
-                c = conn.cursor()
-                if cliente_id:
-                    c.execute("UPDATE clienti SET nome=?, telefono=?, email=?, pec=?, indirizzo=?, piva=?, note=? WHERE id=?",
-                              (nome, entries["Telefono"].get(), entries["Email"].get(), entries["PEC"].get(), entries["Indirizzo"].get(), entries["Partita IVA"].get(), entries["Note"].get(), cliente_id))
-                else:
-                    c.execute("INSERT INTO clienti (nome, telefono, email, pec, indirizzo, piva, note) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                              (nome, entries["Telefono"].get(), entries["Email"].get(), entries["PEC"].get(), entries["Indirizzo"].get(), entries["Partita IVA"].get(), entries["Note"].get()))
-                conn.commit()
-            self.aggiorna_tabella()
-            win.destroy()
-
-        ttk.Button(win, text="Salva", command=salva).pack(pady=15)
-
-    def modal_modifica_cliente(self):
-        sel = self.tree.selection()
-        if not sel: return
-        self.modal_nuovo_cliente(cliente_id=self.tree.item(sel[0], "values")[0])
-
-    def elimina_cliente(self):
-        sel = self.tree.selection()
-        if not sel: return
-        cid = self.tree.item(sel[0], "values")[0]
-        if messagebox.askyesno("Conferma", "Eliminare il cliente?"):
-            with self.db.get_connection() as conn:
-                c = conn.cursor()
-                c.execute("DELETE FROM clienti WHERE id=?", (cid,))
-                conn.commit()
-            self.aggiorna_tabella()
-
-
-# ==============================================================================
-# 3. TAB MATERIALI
-# ==============================================================================
-class TabMateriali(ttk.Frame):
-    def __init__(self, parent, db):
-        super().__init__(parent)
-        self.db = db
-        self.setup_ui()
-
-    def setup_ui(self):
-        frame_top = ttk.Frame(self)
-        frame_top.pack(fill="x", padx=10, pady=5)
-        ttk.Button(frame_top, text="+ Nuovo Materiale", command=self.modal_nuovo_materiale).pack(side="left", padx=5)
-        ttk.Button(frame_top, text="✏️ Modifica", command=self.modal_modifica_materiale).pack(side="left", padx=5)
-        ttk.Button(frame_top, text="🗑️ Elimina", command=self.elimina_materiale).pack(side="left", padx=5)
-
-        ttk.Label(frame_top, text="🔍 Cerca:").pack(side="left", padx=(20, 5))
-        self.e_ricerca = ttk.Entry(frame_top, width=25)
-        self.e_ricerca.pack(side="left", padx=5)
-        self.e_ricerca.bind("<KeyRelease>", lambda e: self.aggiorna_tabella())
-
-        cols = ("ID", "Codice", "Nome Materiale", "Prezzo Acquisto (€)", "U.M.", "Sfrido %")
-        self.tree = ttk.Treeview(self, columns=cols, show="headings")
-        for col in cols:
-            self.tree.heading(col, text=col)
-            self.tree.column(col, width=80 if col == "ID" else 130)
-        self.tree.pack(fill="both", expand=True, padx=10, pady=5)
-        self.aggiorna_tabella()
-
-    def aggiorna_tabella(self):
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        q = f"%{self.e_ricerca.get().strip()}%"
-        with self.db.get_connection() as conn:
-            c = conn.cursor()
-            c.execute("SELECT id, codice, nome, prezzo, unita, sfrido FROM materiali WHERE nome LIKE ? OR codice LIKE ?", (q, q))
-            for row in c.fetchall():
-                self.tree.insert("", "end", values=(row[0], row[1], row[2], f"€ {row[3]:.2f}", row[4], f"{row[5]:.0f}%"))
-
-    def modal_nuovo_materiale(self, mat_id=None):
-        win = tk.Toplevel(self)
-        win.title("Gestione Materiale")
-        win.geometry("380x380")
-        m_data = {}
-        if mat_id:
-            with self.db.get_connection() as conn:
-                c = conn.cursor()
-                c.execute("SELECT codice, nome, prezzo, unita, sfrido FROM materiali WHERE id=?", (mat_id,))
-                row = c.fetchone()
-                if row: m_data = dict(zip(["codice", "nome", "prezzo", "unita", "sfrido"], row))
-
-        ttk.Label(win, text="Codice").pack(anchor="w", padx=20, pady=(5, 0))
-        e_cod = ttk.Entry(win, width=35); e_cod.pack(padx=20); e_cod.insert(0, m_data.get("codice", "MAT-001"))
-        ttk.Label(win, text="Nome*").pack(anchor="w", padx=20, pady=(5, 0))
-        e_nome = ttk.Entry(win, width=35); e_nome.pack(padx=20); 
-        if "nome" in m_data: e_nome.insert(0, m_data["nome"])
-        ttk.Label(win, text="Prezzo Acquisto (€)*").pack(anchor="w", padx=20, pady=(5, 0))
-        e_prezzo = ttk.Entry(win, width=35); e_prezzo.pack(padx=20); 
-        if "prezzo" in m_data: e_prezzo.insert(0, str(m_data["prezzo"]))
-        ttk.Label(win, text="U.M. (es. m², m, pz, kg)").pack(anchor="w", padx=20, pady=(5, 0))
-        e_unita = ttk.Entry(win, width=35); e_unita.pack(padx=20); e_unita.insert(0, m_data.get("unita", "m²"))
-        ttk.Label(win, text="Sfrido %").pack(anchor="w", padx=20, pady=(5, 0))
-        e_sfrido = ttk.Entry(win, width=35); e_sfrido.pack(padx=20); e_sfrido.insert(0, str(m_data.get("sfrido", 10.0)))
-
-        def salva():
-            try:
-                prezzo = parse_float_positivo(e_prezzo.get(), "Prezzo", False)
-                sfrido = parse_float_positivo(e_sfrido.get(), "Sfrido")
-            except ValueError as e:
-                messagebox.showerror("Errore", str(e))
-                return
-            with self.db.get_connection() as conn:
-                c = conn.cursor()
-                if mat_id:
-                    c.execute("UPDATE materiali SET codice=?, nome=?, prezzo=?, unita=?, sfrido=? WHERE id=?",
-                              (e_cod.get(), e_nome.get(), prezzo, e_unita.get(), sfrido, mat_id))
-                else:
-                    c.execute("INSERT INTO materiali (codice, nome, prezzo, unita, sfrido) VALUES (?, ?, ?, ?, ?)",
-                              (e_cod.get(), e_nome.get(), prezzo, e_unita.get(), sfrido))
-                conn.commit()
-            self.aggiorna_tabella()
-            win.destroy()
-
-        ttk.Button(win, text="Salva", command=salva).pack(pady=15)
-
-    def modal_modifica_materiale(self):
-        sel = self.tree.selection()
-        if not sel: return
-        self.modal_nuovo_materiale(mat_id=self.tree.item(sel[0], "values")[0])
-
-    def elimina_materiale(self):
-        sel = self.tree.selection()
-        if not sel: return
-        mid = self.tree.item(sel[0], "values")[0]
-        if messagebox.askyesno("Conferma", "Eliminare materiale?"):
-            with self.db.get_connection() as conn:
-                c = conn.cursor()
-                c.execute("DELETE FROM materiali WHERE id=?", (mid,))
-                conn.commit()
-            self.aggiorna_tabella()
-
-
-# ==============================================================================
-# 4. TAB LAVORAZIONI
-# ==============================================================================
-class TabLavorazioni(ttk.Frame):
-    def __init__(self, parent, db):
-        super().__init__(parent)
-        self.db = db
-        self.setup_ui()
-
-    def setup_ui(self):
-        frame_top = ttk.Frame(self)
-        frame_top.pack(fill="x", padx=10, pady=5)
-        ttk.Button(frame_top, text="+ Nuova Lavorazione", command=self.modal_nuova_lavorazione).pack(side="left", padx=5)
-        ttk.Button(frame_top, text="✏️ Modifica", command=self.modal_modifica_lavorazione).pack(side="left", padx=5)
-        ttk.Button(frame_top, text="🗑️ Elimina", command=self.elimina_lavorazione).pack(side="left", padx=5)
-
-        cols = ("ID", "Codice", "Nome Lavorazione", "Costo Orario (€/h)", "U.M.", "Ore/U.M.")
-        self.tree = ttk.Treeview(self, columns=cols, show="headings")
-        for col in cols:
-            self.tree.heading(col, text=col)
-            self.tree.column(col, width=80 if col == "ID" else 130)
-        self.tree.pack(fill="both", expand=True, padx=10, pady=5)
-        self.aggiorna_tabella()
-
-    def aggiorna_tabella(self):
-        for item in self.tree.get_children(): self.tree.delete(item)
-        with self.db.get_connection() as conn:
-            c = conn.cursor()
-            c.execute("SELECT id, codice, nome, costo_orario, unita, ore_um FROM lavorazioni")
-            for row in c.fetchall():
-                self.tree.insert("", "end", values=(row[0], row[1], row[2], f"€ {row[3]:.2f}", row[4], f"{row[5]:.2f}h"))
-
-    def modal_nuova_lavorazione(self, lav_id=None):
-        win = tk.Toplevel(self)
-        win.title("Gestione Lavorazione")
-        win.geometry("380x380")
-        l_data = {}
-        if lav_id:
-            with self.db.get_connection() as conn:
-                c = conn.cursor()
-                c.execute("SELECT codice, nome, costo_orario, unita, ore_um FROM lavorazioni WHERE id=?", (lav_id,))
-                row = c.fetchone()
-                if row: l_data = dict(zip(["codice", "nome", "costo_orario", "unita", "ore_um"], row))
-
-        ttk.Label(win, text="Codice").pack(anchor="w", padx=20, pady=(5,0))
-        e_cod = ttk.Entry(win, width=35); e_cod.pack(padx=20); e_cod.insert(0, l_data.get("codice", "LAV-001"))
-        ttk.Label(win, text="Nome*").pack(anchor="w", padx=20, pady=(5,0))
-        e_nome = ttk.Entry(win, width=35); e_nome.pack(padx=20); 
-        if "nome" in l_data: e_nome.insert(0, l_data["nome"])
-        ttk.Label(win, text="Costo Orario (€/h)*").pack(anchor="w", padx=20, pady=(5,0))
-        e_costo = ttk.Entry(win, width=35); e_costo.pack(padx=20); 
-        if "costo_orario" in l_data: e_costo.insert(0, str(l_data["costo_orario"]))
-        ttk.Label(win, text="U.M. (es. h, m², pz)").pack(anchor="w", padx=20, pady=(5,0))
-        e_unita = ttk.Entry(win, width=35); e_unita.pack(padx=20); e_unita.insert(0, l_data.get("unita", "h"))
-        ttk.Label(win, text="Ore per U.M.").pack(anchor="w", padx=20, pady=(5,0))
-        e_ore = ttk.Entry(win, width=35); e_ore.pack(padx=20); e_ore.insert(0, str(l_data.get("ore_um", 1.0)))
-
-        def salva():
-            try:
-                costo = parse_float_positivo(e_costo.get(), "Costo", False)
-                ore = parse_float_positivo(e_ore.get(), "Ore", False)
-            except ValueError as e:
-                messagebox.showerror("Errore", str(e))
-                return
-            with self.db.get_connection() as conn:
-                c = conn.cursor()
-                if lav_id:
-                    c.execute("UPDATE lavorazioni SET codice=?, nome=?, costo_orario=?, unita=?, ore_um=? WHERE id=?",
-                              (e_cod.get(), e_nome.get(), costo, e_unita.get(), ore, lav_id))
-                else:
-                    c.execute("INSERT INTO lavorazioni (codice, nome, costo_orario, unita, ore_um) VALUES (?, ?, ?, ?, ?)",
-                              (e_cod.get(), e_nome.get(), costo, e_unita.get(), ore))
-                conn.commit()
-            self.aggiorna_tabella()
-            win.destroy()
-
-        ttk.Button(win, text="Salva", command=salva).pack(pady=15)
-
-    def modal_modifica_lavorazione(self):
-        sel = self.tree.selection()
-        if not sel: return
-        self.modal_nuova_lavorazione(lav_id=self.tree.item(sel[0], "values")[0])
-
-    def elimina_lavorazione(self):
-        sel = self.tree.selection()
-        if not sel: return
-        lid = self.tree.item(sel[0], "values")[0]
-        if messagebox.askyesno("Conferma", "Eliminare lavorazione?"):
-            with self.db.get_connection() as conn:
-                c = conn.cursor()
-                c.execute("DELETE FROM lavorazioni WHERE id=?", (lid,))
-                conn.commit()
-            self.aggiorna_tabella()
-
-
-# ==============================================================================
-# 5. TAB IMPOSTAZIONI
-# ==============================================================================
-class TabImpostazioni(ttk.Frame):
-    def __init__(self, parent, db, callback):
-        super().__init__(parent)
-        self.db = db
-        self.callback = callback
-        self.setup_ui()
-
-    def setup_ui(self):
-        frame = ttk.LabelFrame(self, text="Parametri Generali, Paga Oraria e Ricarichi")
-        frame.pack(fill="x", padx=15, pady=10)
-        self.entries = {}
-        with self.db.get_connection() as conn:
-            c = conn.cursor()
-            c.execute("SELECT chiave, valore, unita FROM impostazioni")
-            imp = c.fetchall()
-
-        for i, row in enumerate(imp):
-            k = row[0]
-            v = row[1]
-            um = row[2] if len(row) > 2 and row[2] else ""
-
-            label_text = f"{k.replace('_', ' ').capitalize()} ({um})" if um else k.replace('_', ' ').capitalize()
-            ttk.Label(frame, text=label_text).grid(row=i, column=0, sticky="w", padx=10, pady=2)
-            e = ttk.Entry(frame, width=15)
-            e.insert(0, str(v))
-            e.grid(row=i, column=1, sticky="w", padx=10, pady=2)
-            self.entries[k] = e
-
-        ttk.Button(frame, text="💾 Salva Impostazioni", command=self.salva).grid(row=len(imp), column=1, pady=10, sticky="w")
-
-        f_help = ttk.LabelFrame(self, text="ℹ️ Guida e Formule di Calcolo")
-        f_help.pack(fill="x", padx=15, pady=10)
-
-        help_testo = (
-            "• Sfrido Materiali: applicato al costo base di ciascun materiale\n"
-            "  (Costo Base = Prezzo Acquisto × Q.tà × (1 + Sfrido / 100))\n\n"
-            "• Ricarico Materiali: applicato al costo del materiale con sfrido\n"
-            "  (Prezzo Vendita Materiale = Costo Base × (1 + Ricarico Materiali / 100))\n\n"
-            "• Ricarico Manodopera: applicato al costo orario di lavorazioni di laboratorio e personale di cantiere\n"
-            "  (Prezzo Vendita Manodopera = Costo Orario × Ore × (1 + Ricarico Manodopera / 100))"
-        )
-
-        lbl_help = ttk.Label(f_help, text=help_testo, font=("Helvetica", 9), justify="left")
-        lbl_help.pack(padx=10, pady=8, anchor="w")
-
-    def salva(self):
-        try:
-            with self.db.get_connection() as conn:
-                c = conn.cursor()
-                for k, ent in self.entries.items():
-                    val = parse_float_positivo(ent.get(), k)
-                    c.execute("UPDATE impostazioni SET valore=? WHERE chiave=?", (val, k))
-                conn.commit()
-            messagebox.showinfo("Salvato", "Impostazioni aggiornate!")
-            self.callback()
-        except ValueError as e:
-            messagebox.showerror("Errore", str(e))
-
-
-# ==============================================================================
-# 6. TAB DASHBOARD
-# ==============================================================================
-class TabDashboard(ttk.Frame):
-    def __init__(self, parent, db):
-        super().__init__(parent)
-        self.db = db
-        self.setup_ui()
-
-    def setup_ui(self):
-        ttk.Label(self, text="📊 Dashboard & KPI Aziendali", font=("Helvetica", 14, "bold")).pack(anchor="w", padx=15, pady=10)
-        
-        self.f_kpi = ttk.Frame(self)
-        self.f_kpi.pack(fill="x", padx=15, pady=5)
-
-        f_scad = ttk.LabelFrame(self, text="🗓️ Prossimi Cantieri in Consegna")
-        f_scad.pack(fill="both", expand=True, padx=15, pady=10)
-
-        cols = ("ID", "Progetto", "Cliente", "Data Consegna", "Stato", "Importo Ivato")
-        self.tree = ttk.Treeview(f_scad, columns=cols, show="headings", height=6)
-        for col in cols:
-            self.tree.heading(col, text=col)
-            self.tree.column(col, width=120)
-        self.tree.pack(fill="both", expand=True, padx=5, pady=5)
-
-        f_help = ttk.LabelFrame(self, text="ℹ️ Guida Indicatori (Cosa sono e come si calcolano)")
-        f_help.pack(fill="x", padx=15, pady=10)
-
-        help_testo = (
-            "• Tasso di Conversione:\n"
-            "  - Cos'è: La percentuale di preventivi che si trasformano in contratti vinti.\n"
-            "  - Come si calcola: (Preventivi con stato 'Approvato' ÷ Preventivi Totali) × 100.\n\n"
-            "• Fatturato Pipeline (Imponibile):\n"
-            "  - Cos'è: Il valore economico complessivo (al netto dell'IVA) di tutti i preventivi presenti nel gestionale.\n"
-            "  - Come si calcola: La somma degli importi imponibili di tutti i preventivi salvati.\n\n"
-            "• Margine Medio Reale:\n"
-            "  - Cos'è: Il guadagno percentuale effettivo dell'officina rispetto al costo di produzione industriale sostenuto.\n"
-            "  - Come si calcola: [(Totale Imponibile - Totale Costi Diretti / Aziendali) ÷ Totale Imponibile] × 100."
-        )
-        
-        lbl_help = ttk.Label(f_help, text=help_testo, font=("Helvetica", 9), justify="left")
-        lbl_help.pack(padx=10, pady=8, anchor="w")
-
-        self.aggiorna()
-
-    def aggiorna(self):
-        for w in self.f_kpi.winfo_children(): w.destroy()
-        for item in self.tree.get_children(): self.tree.delete(item)
-
-        with self.db.get_connection() as conn:
-            c = conn.cursor()
-            c.execute("SELECT COUNT(*), SUM(imponibile), SUM(costo_diretto) FROM preventivi")
-            tot_p, sum_imp, sum_costo = c.fetchone()
-            tot_p = tot_p or 0
-            sum_imp = sum_imp or 0.0
-            sum_costo = sum_costo or 0.0
-
-            c.execute("SELECT COUNT(*) FROM preventivi WHERE stato='Approvato'")
-            app_p = c.fetchone()[0] or 0
-
-            tasso = (app_p / tot_p * 100) if tot_p > 0 else 0.0
-            margine = ((sum_imp - sum_costo) / sum_imp * 100) if sum_imp > 0 else 0.0
-
-            c.execute("SELECT id, titolo, cliente, data_consegna, stato, ivato FROM preventivi WHERE data_consegna IS NOT NULL AND data_consegna != '' ORDER BY data_consegna ASC")
-            for r in c.fetchall():
-                self.tree.insert("", "end", values=(r[0], r[1], r[2], r[3], r[4], f"€ {r[5]:.2f}"))
-
-        kpis = [
-            ("Preventivi Totali", f"{tot_p}", "#2B6CB0"),
-            ("Tasso di Conversione Approvati", f"{tasso:.1f}%", "#2F855A"),
-            ("Fatturato Pipeline (Imponibile)", f"€ {sum_imp:,.2f}", "#D69E2E"),
-            ("Margine Medio Reale", f"{margine:.1f}%", "#805AD5")
-        ]
-        for i, (tit, val, col) in enumerate(kpis):
-            box = ttk.LabelFrame(self.f_kpi, text=tit)
-            box.grid(row=0, column=i, padx=5, sticky="nsew")
-            self.f_kpi.columnconfigure(i, weight=1)
-            ttk.Label(box, text=val, font=("Helvetica", 13, "bold"), foreground=col).pack(padx=10, pady=10)
-
-
-# ==============================================================================
-# 7. TAB PREVENTIVI & ESPORTAZIONE PDF PROFESSIONALE
-# ==============================================================================
-class TabPreventivi(ttk.Frame):
-    STATI = ["Bozza", "Inviato", "Approvato", "Rifiutato", "In Lavorazione", "Completato"]
-
-    def __init__(self, parent, db, callback_dash):
-        super().__init__(parent)
-        self.db = db
-        self.callback_dash = callback_dash
-        self.setup_ui()
-
+            if "unita" not in [col[1] for col in c.fetchall()]:
+                c.execute("ALTER TABLE impostazioni ADD COLUMN unita TEXT")
+
+            for chiave, (valore, unita) in IMPOSTAZIONI_DEFAULT.items():
+                c.execute("INSERT OR IGNORE INTO impostazioni (chiave, valore, unita) VALUES (?, ?, ?)",
+                          (chiave, valore, unita))
+                c.execute("UPDATE impostazioni SET unita=? WHERE chiave=? AND (unita IS NULL OR unita='')",
+                          (unita, chiave))
+
+    # ---- impostazioni -----------------------------------------------------
     def get_imp(self):
-        with self.db.get_connection() as conn:
-            c = conn.cursor()
-            c.execute("SELECT chiave, valore FROM impostazioni")
-            return dict(c.fetchall())
+        return {r["chiave"]: r["valore"] for r in self.query("SELECT chiave, valore FROM impostazioni")}
 
-    def setup_ui(self):
-        f_top = ttk.Frame(self)
-        f_top.pack(fill="x", padx=10, pady=5)
-        ttk.Button(f_top, text="+ Nuovo Preventivo", command=lambda: self.modal_nuovo_preventivo()).pack(side="left", padx=5)
-        ttk.Button(f_top, text="📋 Modifica / Revisiona", command=self.apri_revisione).pack(side="left", padx=5)
-        ttk.Button(f_top, text="🔍 Dettaglio", command=self.dettaglio).pack(side="left", padx=5)
-        ttk.Button(f_top, text="📦 Ordine Materiali", command=self.ordine_materiali).pack(side="left", padx=5)
-        ttk.Button(f_top, text="📄 PDF", command=self.esporta_pdf).pack(side="left", padx=5)
-        ttk.Button(f_top, text="📊 Excel", command=self.esporta_excel).pack(side="left", padx=5)
-        ttk.Button(f_top, text="🔄 Stato", command=self.cambia_stato).pack(side="left", padx=5)
-        ttk.Button(f_top, text="🗑️ Elimina", command=self.elimina).pack(side="left", padx=5)
+    # ---- listino Excel ----------------------------------------------------
+    def importa_listino(self, sorgente):
+        """Importa materiali e lavorazioni da un file Excel (percorso o file caricato).
+        I codici già presenti vengono ignorati. Ritorna (n_materiali, n_lavorazioni)."""
+        xls = pd.ExcelFile(sorgente)
+        n_mat = n_lav = 0
 
-        cols = ("ID", "Titolo", "Rev.", "Cliente", "Imponibile", "Ivato", "Stato", "Consegna")
-        self.tree = ttk.Treeview(self, columns=cols, show="headings")
-        for col in cols:
-            self.tree.heading(col, text=col)
-            self.tree.column(col, width=50 if col == "Rev." else 120)
-        self.tree.pack(fill="both", expand=True, padx=10, pady=5)
-        self.tree.bind("<Double-1>", lambda e: self.dettaglio())
-        self.aggiorna()
+        def testo(riga, chiave, default=""):
+            v = riga.get(chiave)
+            return default if pd.isna(v) else str(v).strip()
 
-    def aggiorna(self):
-        for item in self.tree.get_children(): self.tree.delete(item)
-        with self.db.get_connection() as conn:
-            c = conn.cursor()
-            c.execute("SELECT id, titolo, revisione, cliente, imponibile, ivato, stato, data_consegna FROM preventivi ORDER BY id DESC")
-            for r in c.fetchall():
-                self.tree.insert("", "end", values=(r[0], r[1], f"Rev.{r[2]}", r[3], f"€ {r[4]:.2f}", f"€ {r[5]:.2f}", r[6], r[7] or "-"))
-        self.callback_dash()
+        def numero(riga, chiave, default):
+            v = pd.to_numeric(riga.get(chiave), errors="coerce")
+            return default if pd.isna(v) else float(v)
 
-    def cambia_stato(self):
-        sel = self.tree.selection()
-        if not sel: return
-        pid = self.tree.item(sel[0], "values")[0]
-        win = tk.Toplevel(self)
-        win.title("Cambia Stato")
-        win.geometry("260x130")
-        cb = ttk.Combobox(win, values=self.STATI, state="readonly", width=20)
-        cb.pack(pady=15); cb.set(self.tree.item(sel[0], "values")[6])
-        def salva():
-            with self.db.get_connection() as conn:
-                c = conn.cursor()
-                c.execute("UPDATE preventivi SET stato=? WHERE id=?", (cb.get(), pid))
-                conn.commit()
-            win.destroy(); self.aggiorna()
-        ttk.Button(win, text="Aggiorna", command=salva).pack()
+        with self.conn() as con:
+            if "Listino_Materiali" in xls.sheet_names:
+                for _, r in pd.read_excel(xls, sheet_name="Listino_Materiali").iterrows():
+                    nome = testo(r, "Materiale")
+                    if not nome:
+                        continue
+                    sfrido = numero(r, "Sfrido %", 0.10)
+                    sfrido = sfrido * 100 if sfrido < 1 else sfrido  # 0.10 oppure 10 -> 10 %
+                    codice = testo(r, "Codice") or None
+                    if codice is None and con.execute("SELECT 1 FROM materiali WHERE nome=?", (nome,)).fetchone():
+                        continue  # senza codice il vincolo UNIQUE non protegge: confronto per nome
+                    cur = con.execute(
+                        "INSERT OR IGNORE INTO materiali (codice, nome, unita, prezzo, sfrido) VALUES (?, ?, ?, ?, ?)",
+                        (codice, nome, testo(r, "U.M.", "pz"), numero(r, "Costo acquisto (€)", 0.0), sfrido))
+                    n_mat += cur.rowcount
+            if "Listino_Lavorazioni" in xls.sheet_names:
+                for _, r in pd.read_excel(xls, sheet_name="Listino_Lavorazioni").iterrows():
+                    nome = testo(r, "Lavorazione")
+                    if not nome:
+                        continue
+                    codice = testo(r, "Codice") or None
+                    if codice is None and con.execute("SELECT 1 FROM lavorazioni WHERE nome=?", (nome,)).fetchone():
+                        continue
+                    cur = con.execute(
+                        "INSERT OR IGNORE INTO lavorazioni (codice, nome, unita, costo_orario, ore_um) VALUES (?, ?, ?, ?, ?)",
+                        (codice, nome, testo(r, "U.M.", "m²"),
+                         numero(r, "Costo orario (€)", 40.0), numero(r, "Ore/U.M.", 1.0)))
+                    n_lav += cur.rowcount
+        return n_mat, n_lav
 
-    def apri_revisione(self):
-        sel = self.tree.selection()
-        if not sel:
-            messagebox.showwarning("Seleziona", "Seleziona un preventivo da revisionare.")
+    def importa_listino_se_vuoto(self):
+        if not os.path.exists(LISTINO_XLSX):
             return
-        pid = self.tree.item(sel[0], "values")[0]
-        self.modal_nuovo_preventivo(preventivo_id_da_copiare=pid)
-
-    def modal_nuovo_preventivo(self, preventivo_id_da_copiare=None):
-        imp = self.get_imp()
-        win = tk.Toplevel(self)
-        win.title("Composizione / Revisione Preventivo Scenografico")
-        win.geometry("1020x920")
-
-        f_top = ttk.LabelFrame(win, text="Dati Generali")
-        f_top.pack(fill="x", padx=10, pady=5)
-        
-        ttk.Label(f_top, text="Titolo Progetto*:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        e_titolo = ttk.Entry(f_top, width=30); e_titolo.grid(row=0, column=1, padx=5, pady=5)
-
-        ttk.Label(f_top, text="Cliente*:").grid(row=0, column=2, padx=5, pady=5, sticky="w")
-        with self.db.get_connection() as conn:
-            c = conn.cursor()
-            c.execute("SELECT nome FROM clienti")
-            clienti = [r[0] for r in c.fetchall()]
-        combo_cl = ttk.Combobox(f_top, values=clienti, width=25); combo_cl.grid(row=0, column=3, padx=5, pady=5)
-
-        ttk.Label(f_top, text="Inizio Lavori:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
-        e_in = ttk.Entry(f_top, width=15); e_in.insert(0, datetime.date.today().strftime("%d/%m/%Y")); e_in.grid(row=1, column=1, padx=5, pady=5, sticky="w")
-        ttk.Label(f_top, text="Consegna:").grid(row=1, column=2, padx=5, pady=5, sticky="w")
-        e_co = ttk.Entry(f_top, width=15); e_co.insert(0, (datetime.date.today() + datetime.timedelta(days=15)).strftime("%d/%m/%Y")); e_co.grid(row=1, column=3, padx=5, pady=5, sticky="w")
-
-        f_voci = ttk.LabelFrame(win, text="Voci Inserite nel Preventivo")
-        f_voci.pack(fill="both", expand=True, padx=10, pady=5)
-        
-        cols = ("Tipo", "Nome", "Q.tà", "U.M.", "Ore", "Costo", "Vendita")
-        tree_v = ttk.Treeview(f_voci, columns=cols, show="headings", height=6)
-        for col in cols: tree_v.heading(col, text=col); tree_v.column(col, width=110)
-        tree_v.pack(fill="both", expand=True, padx=5, pady=5)
-
-        voci_list = []
-
-        def rimuovi_voce_selezionata():
-            sel_items = tree_v.selection()
-            if not sel_items:
-                messagebox.showwarning("Seleziona", "Seleziona una voce da eliminare.")
-                return
-            for item in sel_items:
-                idx = tree_v.index(item)
-                del voci_list[idx]
-                tree_v.delete(item)
-
-        ttk.Button(f_voci, text="🗑️ Rimuovi Voce Selezionata", command=rimuovi_voce_selezionata).pack(pady=5, anchor="e", padx=5)
-
-        num_rev = 0
-        padre_id = 0
-        if preventivo_id_da_copiare:
-            with self.db.get_connection() as conn:
-                c = conn.cursor()
-                c.execute("SELECT titolo, cliente, km_trasporto, revisione FROM preventivi WHERE id=?", (preventivo_id_da_copiare,))
-                p_old = c.fetchone()
-                if p_old:
-                    e_titolo.insert(0, p_old[0])
-                    combo_cl.set(p_old[1])
-                    num_rev = p_old[3] + 1
-                    padre_id = preventivo_id_da_copiare
-
-                c.execute("SELECT tipo, nome, qta, um, ore, costo_base, prezzo_vendita FROM voci_preventivo WHERE preventivo_id=?", (preventivo_id_da_copiare,))
-                for vr in c.fetchall():
-                    if vr[0] not in ["Logistica", "Manodopera / Operatori", "Manodopera Cantiere"]:
-                        voci_list.append({"tipo": vr[0], "nome": vr[1], "qta": vr[2], "um": vr[3], "ore": vr[4], "costo_base": vr[5], "prezzo": vr[6]})
-                        tree_v.insert("", "end", values=(vr[0], vr[1], vr[2], vr[3], f"{vr[4]}h" if vr[4]>0 else "-", f"€ {vr[5]:.2f}", f"€ {vr[6]:.2f}"))
-
-        with self.db.get_connection() as conn:
-            c = conn.cursor()
-            c.execute("SELECT nome, prezzo, unita, sfrido FROM materiali")
-            l_mat = c.fetchall()
-
-        f_mat = ttk.LabelFrame(win, text="Aggiungi Materiale")
-        f_mat.pack(fill="x", padx=10, pady=5)
-        cb_m = ttk.Combobox(f_mat, values=[m[0] for m in l_mat], width=30); cb_m.grid(row=0, column=0, padx=5)
-        e_qm = ttk.Entry(f_mat, width=8); e_qm.insert(0, "1"); e_qm.grid(row=0, column=2, padx=5)
-        lbl_mat_um = ttk.Label(f_mat, text="U.M.: -", font=("Helvetica", 9, "bold"))
-        lbl_mat_um.grid(row=0, column=3, padx=10)
-
-        def update_mat_um(event=None):
-            idx = cb_m.current()
-            if idx >= 0:
-                lbl_mat_um.config(text=f"U.M.: {l_mat[idx][2]}")
-        cb_m.bind("<<ComboboxSelected>>", update_mat_um)
-
-        def add_m():
-            idx = cb_m.current()
-            if idx < 0: return
-            m = l_mat[idx]
-            qta = parse_float_positivo(e_qm.get(), "Q.tà", False)
-            costo = m[1] * qta * (1 + m[3]/100.0)
-            vendita = costo * (1 + imp.get("ricarico_materiali", 35)/100.0)
-            voci_list.append({"tipo": "Materiale", "nome": m[0], "qta": qta, "um": m[2], "ore": 0.0, "costo_base": costo, "prezzo": vendita})
-            tree_v.insert("", "end", values=("Materiale", m[0], qta, m[2], "-", f"€ {costo:.2f}", f"€ {vendita:.2f}"))
-        ttk.Button(f_mat, text="+ Aggiungi", command=add_m).grid(row=0, column=4, padx=10)
-
-        with self.db.get_connection() as conn:
-            c = conn.cursor()
-            c.execute("SELECT nome, costo_orario, unita, ore_um FROM lavorazioni")
-            l_lav = c.fetchall()
-
-        f_lav = ttk.LabelFrame(win, text="Aggiungi Lavorazione Laboratorio")
-        f_lav.pack(fill="x", padx=10, pady=5)
-        cb_l = ttk.Combobox(f_lav, values=[l[0] for l in l_lav], width=30); cb_l.grid(row=0, column=0, padx=5)
-        e_ql = ttk.Entry(f_lav, width=8); e_ql.insert(0, "1"); e_ql.grid(row=0, column=2, padx=5)
-        e_ol = ttk.Entry(f_lav, width=8); e_ol.grid(row=0, column=4, padx=5)
-        lbl_lav_um = ttk.Label(f_lav, text="U.M.: -", font=("Helvetica", 9, "bold"))
-        lbl_lav_um.grid(row=0, column=5, padx=10)
-
-        def update_lav_um(event=None):
-            idx = cb_l.current()
-            if idx >= 0:
-                lbl_lav_um.config(text=f"U.M.: {l_lav[idx][2]}")
-        cb_l.bind("<<ComboboxSelected>>", update_lav_um)
-
-        def add_l():
-            idx = cb_l.current()
-            if idx < 0: return
-            l = l_lav[idx]
-            qta = parse_float_positivo(e_ql.get(), "Q.tà", False)
-            ore = parse_float_positivo(e_ol.get(), "Ore", False)
-            costo = ore * l[1]
-            vendita = costo * (1 + imp.get("ricarico_manodopera", 25)/100.0)
-            voci_list.append({"tipo": "Lavorazione", "nome": l[0], "qta": qta, "um": l[2], "ore": ore, "costo_base": costo, "prezzo": vendita})
-            tree_v.insert("", "end", values=("Lavorazione", l[0], qta, l[2], f"{ore}h", f"€ {costo:.2f}", f"€ {vendita:.2f}"))
-        ttk.Button(f_lav, text="+ Aggiungi", command=add_l).grid(row=0, column=6, padx=10)
-
-        f_ext = ttk.LabelFrame(win, text="Cantiere, Trasporto & Personale Operativo")
-        f_ext.pack(fill="x", padx=10, pady=5)
-
-        ttk.Label(f_ext, text="Ore Falegname:").grid(row=0, column=0, padx=5, pady=3, sticky="e")
-        e_of = ttk.Entry(f_ext, width=8); e_of.insert(0, "0"); e_of.grid(row=0, column=1, padx=5, pady=3)
-
-        ttk.Label(f_ext, text="Ore Fabbro:").grid(row=0, column=2, padx=5, pady=3, sticky="e")
-        e_ofab = ttk.Entry(f_ext, width=8); e_ofab.insert(0, "0"); e_ofab.grid(row=0, column=3, padx=5, pady=3)
-
-        ttk.Label(f_ext, text="Ore Pittore:").grid(row=0, column=4, padx=5, pady=3, sticky="e")
-        e_opit = ttk.Entry(f_ext, width=8); e_opit.insert(0, "0"); e_opit.grid(row=0, column=5, padx=5, pady=3)
-
-        ttk.Label(f_ext, text="Ore Elettricista:").grid(row=1, column=0, padx=5, pady=3, sticky="e")
-        e_oele = ttk.Entry(f_ext, width=8); e_oele.insert(0, "0"); e_oele.grid(row=1, column=1, padx=5, pady=3)
-
-        ttk.Label(f_ext, text="Ore Amministrazione:").grid(row=1, column=2, padx=5, pady=3, sticky="e")
-        e_oamm = ttk.Entry(f_ext, width=8); e_oamm.insert(0, "0"); e_oamm.grid(row=1, column=3, padx=5, pady=3)
-
-        ttk.Label(f_ext, text="Ore Titolare:").grid(row=1, column=4, padx=5, pady=3, sticky="e")
-        e_otit = ttk.Entry(f_ext, width=8); e_otit.insert(0, "0"); e_otit.grid(row=1, column=5, padx=5, pady=3)
-
-        ttk.Label(f_ext, text="Km Trasporto A/R:").grid(row=2, column=0, padx=5, pady=5, sticky="e")
-        e_km = ttk.Entry(f_ext, width=8); e_km.insert(0, "0"); e_km.grid(row=2, column=1, padx=5, pady=5)
-
-        def salva():
-            titolo = e_titolo.get().strip()
-            cliente = combo_cl.get().strip()
-            if not titolo or not cliente:
-                messagebox.showerror("Errore", "Titolo e Cliente obbligatori!")
-                return
+        if self.query("SELECT COUNT(*) AS n FROM materiali")[0]["n"] == 0:
             try:
-                km = parse_float_positivo(e_km.get(), "Km Trasporto")
-                ore_fal = parse_float_positivo(e_of.get(), "Ore Falegname")
-                ore_fab = parse_float_positivo(e_ofab.get(), "Ore Fabbro")
-                ore_pit = parse_float_positivo(e_opit.get(), "Ore Pittore")
-                ore_ele = parse_float_positivo(e_oele.get(), "Ore Elettricista")
-                ore_amm = parse_float_positivo(e_oamm.get(), "Ore Amministrazione")
-                ore_tit = parse_float_positivo(e_otit.get(), "Ore Titolare")
-            except ValueError as e:
-                messagebox.showerror("Errore", str(e))
-                return
+                self.importa_listino(LISTINO_XLSX)
+            except Exception as e:
+                print(f"Errore import listino: {e}")
 
-            c_mat = sum(v["costo_base"] for v in voci_list if v["tipo"] == "Materiale")
-            v_mat = sum(v["prezzo"] for v in voci_list if v["tipo"] == "Materiale")
-            c_lav = sum(v["costo_base"] for v in voci_list if v["tipo"] == "Lavorazione")
-            v_lav = sum(v["prezzo"] for v in voci_list if v["tipo"] == "Lavorazione")
+    # ---- preventivi -------------------------------------------------------
+    def salva_preventivo(self, titolo, cliente, inizio, consegna, km, calc, revisione, padre_id):
+        costo_trasporto = sum(r["costo_base"] for r in calc["righe"] if r["tipo"] == TIPO_LOGISTICA)
+        with self.conn() as con:
+            cur = con.execute(
+                """INSERT INTO preventivi (titolo, cliente, costo_diretto, imponibile, iva, ivato, km_trasporto,
+                                           costo_trasporto, stato, revisione, padre_id, data_inizio, data_consegna)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Bozza', ?, ?, ?, ?)""",
+                (titolo, cliente, calc["costo_aziendale"], calc["imponibile"], calc["iva"], calc["ivato"], km,
+                 costo_trasporto, revisione, padre_id,
+                 inizio.isoformat() if inizio else None, consegna.isoformat() if consegna else None))
+            pid = cur.lastrowid
+            for r in calc["righe"]:
+                con.execute(
+                    """INSERT INTO voci_preventivo (preventivo_id, tipo, nome, qta, um, ore, costo_base, prezzo_vendita)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (pid, r["tipo"], r["nome"], r["qta"], r["um"], r["ore"], r["costo_base"], r["prezzo"]))
+        return pid
 
-            c_fal = ore_fal * imp.get("paga_falegname", 40)
-            c_fab = ore_fab * imp.get("paga_fabbro", 45)
-            c_pit = ore_pit * imp.get("paga_pittore", 40)
-            c_ele = ore_ele * imp.get("paga_elettricista", 40)
-            c_amm = ore_amm * imp.get("paga_amministrazione", 25)
-            c_tit = ore_tit * imp.get("paga_titolare", 40)
 
-            c_operai = c_fal + c_fab + c_pit + c_ele + c_amm + c_tit
-            v_operai = c_operai * (1 + imp.get("ricarico_manodopera", 25)/100.0)
-
-            c_tr = km * imp.get("costo_km", 0.90)
-            markup = 1 + (imp.get("markup_finale", 30)/100.0)
-            v_tr = c_tr * markup
-
-            c_dir = c_mat + c_lav + c_operai + c_tr
-            c_aziendale = c_dir * (1 + imp.get("spese_generali", 20)/100.0)
-
-            v_base = v_mat + v_lav + v_operai + v_tr
-            imponibile = v_base * markup
-            iva = imponibile * (imp.get("iva", 22)/100.0)
-            totale = imponibile + iva
-
-            with self.db.get_connection() as conn:
-                c = conn.cursor()
-                c.execute("""
-                    INSERT INTO preventivi (titolo, cliente, costo_diretto, imponibile, iva, ivato, km_trasporto, costo_trasporto, stato, revisione, padre_id, data_inizio, data_consegna)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Bozza', ?, ?, ?, ?)
-                """, (titolo, cliente, c_aziendale, imponibile, iva, totale, km, c_tr, num_rev, padre_id, e_in.get(), e_co.get()))
-                pid = c.lastrowid
-
-                for v in voci_list:
-                    c.execute("INSERT INTO voci_preventivo (preventivo_id, tipo, nome, qta, um, ore, costo_base, prezzo_vendita) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                              (pid, v["tipo"], v["nome"], v["qta"], v["um"], v["ore"], v["costo_base"], v["prezzo"]))
-
-                operai_map = [
-                    ("Falegname (Cantiere/Opera)", ore_fal, c_fal),
-                    ("Fabbro (Cantiere/Opera)", ore_fab, c_fab),
-                    ("Pittore (Cantiere/Opera)", ore_pit, c_pit),
-                    ("Elettricista (Cantiere/Opera)", ore_ele, c_ele),
-                    ("Amministrazione", ore_amm, c_amm),
-                    ("Titolare / Direzione", ore_tit, c_tit),
-                ]
-
-                for ruolo_nome, ore_val, costo_val in operai_map:
-                    if ore_val > 0:
-                        prezzo_val = costo_val * (1 + imp.get("ricarico_manodopera", 25)/100.0) * markup
-                        c.execute("INSERT INTO voci_preventivo (preventivo_id, tipo, nome, qta, um, ore, costo_base, prezzo_vendita) VALUES (?, ?, ?, ?, 'h', ?, ?, ?)",
-                                  (pid, "Manodopera / Operatori", ruolo_nome, ore_val, ore_val, costo_val, prezzo_val))
-
-                if km > 0:
-                    c.execute("INSERT INTO voci_preventivo (preventivo_id, tipo, nome, qta, um, ore, costo_base, prezzo_vendita) VALUES (?, ?, 'Trasporto e Logistica A/R', ?, 'km', 0, ?, ?)",
-                              (pid, "Logistica", km, c_tr, v_tr))
-                conn.commit()
-
-            messagebox.showinfo("Successo", f"Preventivo #{pid} (Rev.{num_rev}) salvato con successo!")
-            win.destroy(); self.aggiorna()
-
-        ttk.Button(win, text="💾 Calcola e Salva Preventivo", command=salva).pack(pady=10)
-
-    def dettaglio(self):
-        sel = self.tree.selection()
-        if not sel: return
-        pid = self.tree.item(sel[0], "values")[0]
-        with self.db.get_connection() as conn:
-            c = conn.cursor()
-            c.execute("SELECT id, titolo, cliente, imponibile, iva, ivato, stato, data_consegna, revisione FROM preventivi WHERE id=?", (pid,))
-            p = c.fetchone()
-            c.execute("SELECT tipo, nome, qta, um, ore, prezzo_vendita FROM voci_preventivo WHERE preventivo_id=?", (pid,))
-            voci = c.fetchall()
-
-        win = tk.Toplevel(self)
-        win.title(f"Dettaglio Preventivo #{p[0]} (Rev.{p[8]})")
-        win.geometry("800x600")
-        ttk.Label(win, text=f"Progetto: {p[1]} | Cliente: {p[2]} | Stato: {p[6]}", font=("Helvetica", 11, "bold")).pack(padx=10, pady=10, anchor="w")
-        
-        cols = ("Tipo", "Nome", "Q.tà", "U.M.", "Ore", "Prezzo Vendita")
-        tree = ttk.Treeview(win, columns=cols, show="headings")
-        for col in cols: tree.heading(col, text=col); tree.column(col, width=120)
-        tree.pack(fill="both", expand=True, padx=10, pady=5)
-        for v in voci:
-            tree.insert("", "end", values=(v[0], v[1], v[2], v[3], f"{v[4]}h" if v[4]>0 else "-", f"€ {v[5]:.2f}"))
-        ttk.Label(win, text=f"Imponibile: € {p[3]:.2f} | Totale Ivato: € {p[5]:.2f}", font=("Helvetica", 11, "bold"), foreground="green").pack(pady=15)
-
-    def ordine_materiali(self):
-        sel = self.tree.selection()
-        if not sel: return
-        pid = self.tree.item(sel[0], "values")[0]
-        with self.db.get_connection() as conn:
-            c = conn.cursor()
-            c.execute("SELECT nome, qta, um FROM voci_preventivo WHERE preventivo_id=? AND tipo='Materiale'", (pid,))
-            rows = c.fetchall()
-        if not rows:
-            messagebox.showinfo("Info", "Nessun materiale in questo preventivo.")
-            return
-        path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")], initialfile=f"Ordine_Materiali_Prev_{pid}.xlsx")
-        if not path: return
-        df = pd.DataFrame(rows, columns=["Materiale", "Quantità", "U.M."])
-        df.to_excel(path, index=False)
-        messagebox.showinfo("Completato", f"Ordine salvato in:\n{path}")
-
-    def esporta_pdf(self):
-        if not REPORTLAB_AVAILABLE:
-            messagebox.showerror("Errore", "ReportLab non installato!")
-            return
-        sel = self.tree.selection()
-        if not sel: return
-        pid = self.tree.item(sel[0], "values")[0]
-        with self.db.get_connection() as conn:
-            c = conn.cursor()
-            c.execute("SELECT id, titolo, cliente, imponibile, iva, ivato, data_consegna FROM preventivi WHERE id=?", (pid,))
-            p = c.fetchone()
-            c.execute("SELECT tipo, nome, qta, um, prezzo_vendita FROM voci_preventivo WHERE preventivo_id=?", (pid,))
-            voci = c.fetchall()
-
-        path = filedialog.asksaveasfilename(
-            defaultextension=".pdf", 
-            filetypes=[("PDF", "*.pdf")], 
-            initialfile=f"Preventivo_{pid}_{p[1].replace(' ', '_')}.pdf"
-        )
-        if not path: return
-
-        # Configurazione documento con margini idonei
-        doc = SimpleDocTemplate(
-            path,
-            pagesize=A4,
-            rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36
-        )
-        styles = getSampleStyleSheet()
-
-        # Stili personalizzati con wrapping testo automatico
-        title_style = ParagraphStyle(
-            'DocTitle',
-            parent=styles['Title'],
-            fontSize=18,
-            leading=22,
-            textColor=colors.HexColor('#1A365D'),
-            alignment=0,
-            spaceAfter=6
-        )
-
-        subtitle_style = ParagraphStyle(
-            'SubTitle',
-            parent=styles['Normal'],
-            fontSize=10,
-            leading=14,
-            textColor=colors.HexColor('#4A5568'),
-            spaceAfter=15
-        )
-
-        cell_style = ParagraphStyle(
-            'CellText',
-            parent=styles['Normal'],
-            fontSize=9,
-            leading=12,
-            textColor=colors.HexColor('#2D3748')
-        )
-
-        cell_header_style = ParagraphStyle(
-            'CellHeader',
-            parent=styles['Normal'],
-            fontSize=9,
-            leading=12,
-            fontName='Helvetica-Bold',
-            textColor=colors.white
-        )
-
-        cell_right = ParagraphStyle('CellRight', parent=cell_style, alignment=2)
-        cell_center = ParagraphStyle('CellCenter', parent=cell_style, alignment=1)
-        header_right = ParagraphStyle('HeaderRight', parent=cell_header_style, alignment=2)
-        header_center = ParagraphStyle('HeaderCenter', parent=cell_header_style, alignment=1)
-
-        elements = []
-
-        # Intestazione Preventivo
-        elements.append(Paragraph(f"<b>Preventivo #{p[0]} - {p[1]}</b>", title_style))
-        elements.append(Paragraph(f"<b>Cliente:</b> {p[2]} &nbsp;&nbsp;|&nbsp;&nbsp; <b>Data Consegna:</b> {p[6] or 'N/D'}", subtitle_style))
-        elements.append(Spacer(1, 10))
-
-        # Costruzione Dati Tabella con Paragrafi per evitare sovrapposizioni
-        table_data = [
-            [
-                Paragraph("<b>Tipo</b>", cell_header_style),
-                Paragraph("<b>Descrizione</b>", cell_header_style),
-                Paragraph("<b>Q.tà</b>", header_center),
-                Paragraph("<b>U.M.</b>", header_center),
-                Paragraph("<b>Prezzo (€)</b>", header_right)
-            ]
-        ]
-
-        for v in voci:
-            table_data.append([
-                Paragraph(str(v[0]), cell_style),
-                Paragraph(str(v[1]), cell_style),
-                Paragraph(f"{v[2]:.1f}", cell_center),
-                Paragraph(str(v[3]), cell_center),
-                Paragraph(f"€ {v[4]:.2f}", cell_right)
-            ])
-
-        # Larghezze colonne bilanciate (Totale = 523pt per pagina A4 con margini)
-        col_widths = [125, 218, 45, 45, 90]
-        t = Table(table_data, colWidths=col_widths, repeatRows=1)
-
-        t_style = [
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2B6CB0')),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('TOPPADDING', (0, 0), (-1, -1), 6),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-            ('INNERGRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E2E8F0')),
-            ('BOX', (0, 0), (-1, -1), 1, colors.HexColor('#CBD5E0')),
-        ]
-
-        # Alternanza colore righe
-        for i in range(1, len(table_data)):
-            if i % 2 == 0:
-                t_style.append(('BACKGROUND', (0, i), (-1, i), colors.HexColor('#F7FAFC')))
-
-        t.setStyle(TableStyle(t_style))
-        elements.append(t)
-        elements.append(Spacer(1, 20))
-
-        # Sezione Totali
-        totali_data = [
-            [Paragraph("<b>Totale Imponibile:</b>", cell_right), Paragraph(f"€ {p[3]:.2f}", cell_right)],
-            [Paragraph("<b>IVA (22%):</b>", cell_right), Paragraph(f"€ {p[4]:.2f}", cell_right)],
-            [
-                Paragraph("<b>Totale Ivato:</b>", ParagraphStyle('TotBold', parent=cell_right, fontName='Helvetica-Bold', fontSize=10)),
-                Paragraph(f"<b>€ {p[5]:.2f}</b>", ParagraphStyle('TotBoldR', parent=cell_right, fontName='Helvetica-Bold', fontSize=10, textColor=colors.HexColor('#2F855A')))
-            ]
-        ]
-        totali_table = Table(totali_data, colWidths=[383, 140])
-        totali_table.setStyle(TableStyle([
-            ('ALIGN', (0, 0), (-1, -1), 'RIGHT'),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('TOPPADDING', (0, 0), (-1, -1), 4),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-            ('LINEABOVE', (0, 2), (-1, 2), 1, colors.HexColor('#2B6CB0')),
-        ]))
-
-        elements.append(totali_table)
-
-        doc.build(elements)
-        messagebox.showinfo("PDF Generato", "Il PDF è stato generato con successo!")
-
-    def esporta_excel(self):
-        sel = self.tree.selection()
-        if not sel: return
-        pid = self.tree.item(sel[0], "values")[0]
-        with self.db.get_connection() as conn:
-            c = conn.cursor()
-            c.execute("SELECT tipo, nome, qta, um, ore, costo_base, prezzo_vendita FROM voci_preventivo WHERE preventivo_id=?", (pid,))
-            voci = c.fetchall()
-        path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")])
-        if not path: return
-        pd.DataFrame(voci, columns=["Tipo", "Nome", "Q.tà", "U.M.", "Ore", "Costo", "Vendita"]).to_excel(path, index=False)
-        messagebox.showinfo("Excel", "Esportato con successo!")
-
-    def elimina(self):
-        sel = self.tree.selection()
-        if not sel: return
-        pid = self.tree.item(sel[0], "values")[0]
-        if messagebox.askyesno("Conferma", "Eliminare il preventivo?"):
-            with self.db.get_connection() as conn:
-                c = conn.cursor()
-                c.execute("DELETE FROM preventivi WHERE id=?", (pid,))
-                conn.commit()
-            self.aggiorna()
+@st.cache_resource
+def get_db():
+    return DatabaseManager()
 
 
 # ==============================================================================
-# 8. APPLICAZIONE PRINCIPALE
+# 2. CALCOLO DEL PREVENTIVO
 # ==============================================================================
-class GestionaleScenografia:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Gestionale Preventivi Scenografici")
-        self.root.geometry("1200x880")
+def calcola(voci, ore_ruoli, km, imp):
+    """Calcola righe e totali.
 
-        self.db = DatabaseManager()
-        self.db.carica_da_excel_se_vuoto()
+    Ogni riga ha un prezzo di vendita già comprensivo di ricarico di categoria
+    (materiali / manodopera) e di markup finale: la somma delle righe coincide
+    quindi con l'imponibile mostrato nel PDF.
+    """
+    def g(chiave, default):
+        return float(imp.get(chiave, default))
 
-        self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
+    markup = 1 + g("markup_finale", 30.0) / 100
+    ric_mat = 1 + g("ricarico_materiali", 35.0) / 100
+    ric_man = 1 + g("ricarico_manodopera", 25.0) / 100
 
-        self.tab_dash = TabDashboard(self.notebook, self.db)
-        self.tab_prev = TabPreventivi(self.notebook, self.db, self.tab_dash.aggiorna)
-        self.tab_cli = TabClienti(self.notebook, self.db)
-        self.tab_mat = TabMateriali(self.notebook, self.db)
-        self.tab_lav = TabLavorazioni(self.notebook, self.db)
-        self.tab_imp = TabImpostazioni(self.notebook, self.db, self.tab_dash.aggiorna)
+    righe = []
+    for v in voci:
+        ric = ric_mat if v["tipo"] == TIPO_MATERIALE else ric_man
+        righe.append({**v, "prezzo": round(v["costo_base"] * ric * markup, 2)})
 
-        self.notebook.add(self.tab_dash, text="📊 Dashboard")
-        self.notebook.add(self.tab_prev, text="📋 Preventivi")
-        self.notebook.add(self.tab_cli, text="👥 Clienti")
-        self.notebook.add(self.tab_mat, text="📦 Materiali")
-        self.notebook.add(self.tab_lav, text="🛠️ Lavorazioni")
-        self.notebook.add(self.tab_imp, text="⚙️ Impostazioni")
+    for chiave, _, nome_voce, chiave_paga, paga_default in RUOLI:
+        ore = float(ore_ruoli.get(chiave) or 0)
+        if ore > 0:
+            costo = ore * g(chiave_paga, paga_default)
+            righe.append({"tipo": TIPO_OPERATORI, "nome": nome_voce, "qta": ore, "um": "h", "ore": ore,
+                          "costo_base": costo, "prezzo": round(costo * ric_man * markup, 2)})
+
+    if km and km > 0:
+        costo = km * g("costo_km", 0.90)
+        righe.append({"tipo": TIPO_LOGISTICA, "nome": "Trasporto e Logistica A/R", "qta": km, "um": "km",
+                      "ore": 0.0, "costo_base": costo, "prezzo": round(costo * markup, 2)})
+
+    costo_diretto = sum(r["costo_base"] for r in righe)
+    costo_aziendale = costo_diretto * (1 + g("spese_generali", 20.0) / 100)
+    imponibile = round(sum(r["prezzo"] for r in righe), 2)
+    iva_perc = g("iva", 22.0)
+    iva = round(imponibile * iva_perc / 100, 2)
+    ivato = round(imponibile + iva, 2)
+    margine = (imponibile - costo_aziendale) / imponibile * 100 if imponibile > 0 else 0.0
+    return {"righe": righe, "costo_diretto": costo_diretto, "costo_aziendale": costo_aziendale,
+            "imponibile": imponibile, "iva_perc": iva_perc, "iva": iva, "ivato": ivato, "margine": margine}
+
+
+# ==============================================================================
+# 3. ESPORTAZIONI (PDF / EXCEL)
+# ==============================================================================
+def genera_pdf(db, pid):
+    p = db.query("SELECT * FROM preventivi WHERE id=?", (pid,))[0]
+    voci = db.query("SELECT tipo, nome, qta, um, prezzo_vendita FROM voci_preventivo WHERE preventivo_id=? ORDER BY id", (pid,))
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36,
+                            title=f"Preventivo {pid}")
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle('DocTitle', parent=styles['Title'], fontSize=18, leading=22,
+                                 textColor=colors.HexColor('#1A365D'), alignment=0, spaceAfter=6)
+    subtitle_style = ParagraphStyle('SubTitle', parent=styles['Normal'], fontSize=10, leading=14,
+                                    textColor=colors.HexColor('#4A5568'), spaceAfter=15)
+    cell_style = ParagraphStyle('CellText', parent=styles['Normal'], fontSize=9, leading=12,
+                                textColor=colors.HexColor('#2D3748'))
+    cell_header = ParagraphStyle('CellHeader', parent=styles['Normal'], fontSize=9, leading=12,
+                                 fontName='Helvetica-Bold', textColor=colors.white)
+    cell_right = ParagraphStyle('CellRight', parent=cell_style, alignment=2)
+    cell_center = ParagraphStyle('CellCenter', parent=cell_style, alignment=1)
+    header_right = ParagraphStyle('HeaderRight', parent=cell_header, alignment=2)
+    header_center = ParagraphStyle('HeaderCenter', parent=cell_header, alignment=1)
+
+    rev = f" (Rev.{p['revisione']})" if p["revisione"] else ""
+    elements = [
+        Paragraph(f"<b>Preventivo #{p['id']}{rev} - {escape(p['titolo'])}</b>", title_style),
+        Paragraph(f"<b>Cliente:</b> {escape(p['cliente'])} &nbsp;&nbsp;|&nbsp;&nbsp; "
+                  f"<b>Data consegna:</b> {fmt_data(p['data_consegna'])}", subtitle_style),
+        Spacer(1, 10),
+    ]
+
+    table_data = [[
+        Paragraph("<b>Tipo</b>", cell_header), Paragraph("<b>Descrizione</b>", cell_header),
+        Paragraph("<b>Q.tà</b>", header_center), Paragraph("<b>U.M.</b>", header_center),
+        Paragraph("<b>Prezzo</b>", header_right),
+    ]]
+    for v in voci:
+        table_data.append([
+            Paragraph(escape(str(v["tipo"] or "")), cell_style),
+            Paragraph(escape(str(v["nome"] or "")), cell_style),
+            Paragraph(num(v["qta"] or 0), cell_center),
+            Paragraph(escape(str(v["um"] or "")), cell_center),
+            Paragraph(eur(v["prezzo_vendita"] or 0), cell_right),
+        ])
+
+    t = Table(table_data, colWidths=[125, 218, 45, 45, 90], repeatRows=1)
+    t_style = [
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2B6CB0')),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ('INNERGRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E2E8F0')),
+        ('BOX', (0, 0), (-1, -1), 1, colors.HexColor('#CBD5E0')),
+    ]
+    for i in range(1, len(table_data)):
+        if i % 2 == 0:
+            t_style.append(('BACKGROUND', (0, i), (-1, i), colors.HexColor('#F7FAFC')))
+    t.setStyle(TableStyle(t_style))
+    elements += [t, Spacer(1, 20)]
+
+    imponibile, iva, ivato = p["imponibile"] or 0, p["iva"] or 0, p["ivato"] or 0
+    iva_perc = round(iva / imponibile * 100, 2) if imponibile else 22
+    tot_bold = ParagraphStyle('TotBold', parent=cell_right, fontName='Helvetica-Bold', fontSize=10)
+    tot_bold_g = ParagraphStyle('TotBoldR', parent=tot_bold, textColor=colors.HexColor('#2F855A'))
+    totali = Table([
+        [Paragraph("<b>Totale imponibile:</b>", cell_right), Paragraph(eur(imponibile), cell_right)],
+        [Paragraph(f"<b>IVA ({num(iva_perc)}%):</b>", cell_right), Paragraph(eur(iva), cell_right)],
+        [Paragraph("<b>Totale ivato:</b>", tot_bold), Paragraph(f"<b>{eur(ivato)}</b>", tot_bold_g)],
+    ], colWidths=[383, 140])
+    totali.setStyle(TableStyle([
+        ('ALIGN', (0, 0), (-1, -1), 'RIGHT'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('TOPPADDING', (0, 0), (-1, -1), 4),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ('LINEABOVE', (0, 2), (-1, 2), 1, colors.HexColor('#2B6CB0')),
+    ]))
+    elements.append(totali)
+    doc.build(elements)
+    return buf.getvalue()
+
+
+def _excel_bytes(df, nome_foglio):
+    from openpyxl.utils import get_column_letter
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=nome_foglio)
+        ws = writer.sheets[nome_foglio]
+        for i, col in enumerate(df.columns, 1):
+            larghezza = max([len(str(col))] + [len(str(x)) for x in df[col]]) + 2
+            ws.column_dimensions[get_column_letter(i)].width = min(larghezza, 60)
+    return buf.getvalue()
+
+
+def genera_excel(db, pid):
+    voci = db.query("SELECT tipo, nome, qta, um, ore, costo_base, prezzo_vendita FROM voci_preventivo WHERE preventivo_id=? ORDER BY id", (pid,))
+    df = pd.DataFrame(voci).rename(columns={"tipo": "Tipo", "nome": "Nome", "qta": "Q.tà", "um": "U.M.",
+                                            "ore": "Ore", "costo_base": "Costo", "prezzo_vendita": "Vendita"})
+    return _excel_bytes(df, "Preventivo")
+
+
+def genera_ordine_materiali(db, pid):
+    righe = db.query("SELECT nome, qta, um FROM voci_preventivo WHERE preventivo_id=? AND tipo=? ORDER BY id",
+                     (pid, TIPO_MATERIALE))
+    if not righe:
+        return None
+    df = pd.DataFrame(righe).rename(columns={"nome": "Materiale", "qta": "Quantità", "um": "U.M."})
+    return _excel_bytes(df, "Ordine materiali")
+
+
+# ==============================================================================
+# 4. STATO DELLA BOZZA (pagina "Nuovo preventivo")
+# ==============================================================================
+DRAFT_WIDGET_KEYS = (
+    ["d_titolo", "d_cliente", "d_inizio", "d_consegna", "d_km",
+     "d_mat_sel", "d_mat_qta", "d_lav_sel", "d_lav_qta", "d_lav_ore", "d_rimuovi"]
+    + [f"d_ore_{r[0]}" for r in RUOLI]
+)
+
+
+def reset_draft():
+    ss = st.session_state
+    oggi = datetime.date.today()
+    ss["d_titolo"] = ""
+    ss["d_cliente"] = None
+    ss["d_inizio"] = oggi
+    ss["d_consegna"] = oggi + datetime.timedelta(days=15)
+    ss["d_km"] = 0.0
+    ss["d_mat_sel"] = None
+    ss["d_mat_qta"] = 1.0
+    ss["d_lav_sel"] = None
+    ss["d_lav_qta"] = 1.0
+    ss["d_lav_ore"] = 1.0
+    ss["d_rimuovi"] = []
+    for r in RUOLI:
+        ss[f"d_ore_{r[0]}"] = 0.0
+    ss["d_voci"] = []
+    ss["d_padre"] = 0
+    ss["d_rev"] = 0
+
+
+def ensure_draft():
+    if "d_voci" not in st.session_state:
+        reset_draft()
+
+
+def keep_draft_alive():
+    """Streamlit cancella il valore dei widget non disegnati: riassegnandolo a ogni
+    esecuzione la bozza sopravvive quando si cambia pagina."""
+    for k in DRAFT_WIDGET_KEYS:
+        if k in st.session_state:
+            st.session_state[k] = st.session_state[k]
+
+
+def carica_revisione(pid):
+    """Callback: copia un preventivo nella bozza come nuova revisione."""
+    db = get_db()
+    p = db.query("SELECT * FROM preventivi WHERE id=?", (pid,))
+    if not p:
+        return
+    p = p[0]
+    reset_draft()
+    ss = st.session_state
+    oggi = datetime.date.today()
+    ss["d_titolo"] = p["titolo"]
+    ss["d_cliente"] = p["cliente"]
+    ss["d_padre"] = pid
+    ss["d_rev"] = (p["revisione"] or 0) + 1
+    ss["d_inizio"] = parse_data(p["data_inizio"]) or oggi
+    ss["d_consegna"] = parse_data(p["data_consegna"]) or (oggi + datetime.timedelta(days=15))
+    ss["d_km"] = float(p["km_trasporto"] or 0)
+    per_nome = {r[2]: r[0] for r in RUOLI}
+    for v in db.query("SELECT * FROM voci_preventivo WHERE preventivo_id=? ORDER BY id", (pid,)):
+        if v["tipo"] in (TIPO_MATERIALE, TIPO_LAVORAZIONE):
+            ss["d_voci"].append({"tipo": v["tipo"], "nome": v["nome"], "qta": v["qta"], "um": v["um"],
+                                 "ore": v["ore"] or 0.0, "costo_base": v["costo_base"] or 0.0})
+        elif v["tipo"] == TIPO_OPERATORI and v["nome"] in per_nome:
+            ss[f"d_ore_{per_nome[v['nome']]}"] = float(v["ore"] or 0)
+    ss["pagina"] = PAGINA_COMPOSER
+
+
+def nuova_bozza():
+    reset_draft()
+    st.session_state["pagina"] = PAGINA_COMPOSER
+
+
+def rimuovi_voci_selezionate():
+    ss = st.session_state
+    da_rimuovere = set(ss.get("d_rimuovi", []))
+    ss["d_voci"] = [v for i, v in enumerate(ss["d_voci"]) if i not in da_rimuovere]
+    ss["d_rimuovi"] = []
+
+
+def salva_bozza():
+    """Callback del pulsante 'Calcola e salva'."""
+    ss = st.session_state
+    db = get_db()
+    titolo = (ss.get("d_titolo") or "").strip()
+    cliente = (ss.get("d_cliente") or "")
+    cliente = cliente.strip() if isinstance(cliente, str) else ""
+    if not titolo or not cliente:
+        ss["_err_comp"] = "Titolo e Cliente sono obbligatori."
+        return
+    inizio, consegna = ss.get("d_inizio"), ss.get("d_consegna")
+    if inizio and consegna and consegna < inizio:
+        ss["_err_comp"] = "La data di consegna è precedente all'inizio lavori."
+        return
+    ore = {r[0]: ss.get(f"d_ore_{r[0]}", 0.0) for r in RUOLI}
+    km = float(ss.get("d_km") or 0)
+    calc = calcola(ss["d_voci"], ore, km, db.get_imp())
+    if not calc["righe"] or calc["imponibile"] <= 0:
+        ss["_err_comp"] = "Il preventivo è vuoto: aggiungi almeno una voce, delle ore o dei km."
+        return
+    rev, padre = ss["d_rev"], ss["d_padre"]
+    pid = db.salva_preventivo(titolo, cliente, inizio, consegna, km, calc, rev, padre)
+    ss["_flash"] = f"Preventivo #{pid} (Rev.{rev}) salvato con successo."
+    reset_draft()
+    ss["pagina"] = PAGINA_PREVENTIVI
+
+
+# ==============================================================================
+# 5. PAGINE
+# ==============================================================================
+def mostra_flash():
+    msg = st.session_state.pop("_flash", None)
+    if msg:
+        st.success(msg)
+
+
+def pagina_dashboard(db):
+    st.header("📊 Dashboard e KPI aziendali")
+    rows = db.query(
+        """SELECT p.id, p.titolo, p.cliente, p.data_consegna, p.stato, p.imponibile, p.ivato, p.costo_diretto
+           FROM preventivi p
+           WHERE NOT EXISTS (SELECT 1 FROM preventivi r WHERE r.padre_id = p.id)"""
+    )  # solo l'ultima revisione di ciascun preventivo
+    totali = len(rows)
+    vinti = sum(1 for r in rows if r["stato"] in STATI_VINTI)
+    attivi = [r for r in rows if r["stato"] != "Rifiutato"]
+    sum_imp = sum(r["imponibile"] or 0 for r in attivi)
+    sum_costo = sum(r["costo_diretto"] or 0 for r in attivi)
+    tasso = vinti / totali * 100 if totali else 0.0
+    margine = (sum_imp - sum_costo) / sum_imp * 100 if sum_imp > 0 else 0.0
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Preventivi totali", totali)
+    c2.metric("Tasso di conversione", f"{tasso:.1f}%")
+    c3.metric("Fatturato pipeline (imponibile)", eur(sum_imp))
+    c4.metric("Margine medio reale", f"{margine:.1f}%")
+
+    st.subheader("🗓️ Prossimi cantieri in consegna")
+    oggi = datetime.date.today()
+    prossimi = []
+    for r in rows:
+        d = parse_data(r["data_consegna"])
+        if d and r["stato"] not in ("Rifiutato", "Completato"):
+            giorni = (d - oggi).days
+            scadenza = f"tra {giorni} gg" if giorni > 0 else ("oggi" if giorni == 0 else f"in ritardo di {-giorni} gg")
+            prossimi.append((d, {"ID": r["id"], "Progetto": r["titolo"], "Cliente": r["cliente"],
+                                 "Consegna": d.strftime("%d/%m/%Y"), "Scadenza": scadenza,
+                                 "Stato": r["stato"], "Importo ivato": eur(r["ivato"] or 0)}))
+    if prossimi:
+        st.dataframe(pd.DataFrame([x[1] for x in sorted(prossimi, key=lambda x: x[0])]), hide_index=True)
+    else:
+        st.info("Nessun cantiere in consegna.")
+
+    with st.expander("ℹ️ Guida indicatori (cosa sono e come si calcolano)"):
+        st.markdown(
+            "Gli indicatori considerano **solo l'ultima revisione** di ciascun preventivo, "
+            "così le revisioni non vengono contate più volte.\n\n"
+            "**Tasso di conversione** – percentuale di preventivi che diventano contratti. "
+            "(Preventivi *Approvato*, *In Lavorazione* o *Completato* ÷ Preventivi totali) × 100.\n\n"
+            "**Fatturato pipeline (imponibile)** – somma degli imponibili (IVA esclusa) dei preventivi "
+            "non rifiutati.\n\n"
+            "**Margine medio reale** – [(Imponibile − Costi aziendali) ÷ Imponibile] × 100, sui preventivi non "
+            "rifiutati. I costi aziendali sono i costi diretti maggiorati delle spese generali."
+        )
+
+
+# ---- CRUD generico (clienti, materiali, lavorazioni) ------------------------
+def campo(k, label, tipo="text", **kw):
+    return {"k": k, "label": label, "tipo": tipo, **kw}
+
+
+def pagina_crud(db, cfg):
+    tabella = cfg["tabella"]
+    campi = cfg["campi"]
+    st.header(cfg["titolo"])
+
+    q = st.text_input("🔍 Cerca", key=f"cerca_{tabella}")
+    sql = f"SELECT * FROM {tabella}"
+    params = ()
+    if q.strip():
+        sql += " WHERE " + " OR ".join(f"{c} LIKE ?" for c in cfg["ricerca"])
+        params = tuple(f"%{q.strip()}%" for _ in cfg["ricerca"])
+    rows = db.query(sql + " ORDER BY id DESC", params)
+
+    if rows:
+        df = pd.DataFrame([{h: (fmt(r[c]) if fmt else ("" if r[c] is None else r[c]))
+                            for c, h, fmt in cfg["colonne"]} for r in rows])
+        st.dataframe(df, hide_index=True)
+    else:
+        st.info("Nessun elemento trovato.")
+
+    def render_campi(prefisso, valori):
+        out = {}
+        for c in campi:
+            key = f"{prefisso}_{c['k']}"
+            iniziale = (valori or {}).get(c["k"])
+            if c["tipo"] == "float":
+                base = iniziale if iniziale is not None else c.get("default", 0.0)
+                out[c["k"]] = st.number_input(c["label"], min_value=0.0, value=float(base),
+                                              step=c.get("step", 0.5), format="%.2f", key=key)
+            else:
+                base = iniziale if iniziale is not None else c.get("default", "")
+                if c["tipo"] == "area":
+                    out[c["k"]] = st.text_area(c["label"], value=str(base), key=key)
+                else:
+                    out[c["k"]] = st.text_input(c["label"], value=str(base), key=key)
+        return out
+
+    def valida(valori):
+        errori = []
+        for c in campi:
+            v = valori[c["k"]]
+            if c.get("obbl") and not str(v).strip():
+                errori.append(f"Il campo «{c['label'].rstrip(' *')}» è obbligatorio.")
+            if c.get("pos") and float(v) <= 0:
+                errori.append(f"Il campo «{c['label'].rstrip(' *')}» deve essere maggiore di zero.")
+        return errori
+
+    def codice_libero():
+        n = (db.query(f"SELECT COALESCE(MAX(id), 0) + 1 AS n FROM {tabella}")[0]["n"])
+        while db.query(f"SELECT 1 FROM {tabella} WHERE codice=?", (f"{cfg['prefisso']}-{n:03d}",)):
+            n += 1
+        return f"{cfg['prefisso']}-{n:03d}"
+
+    def salva(rid, valori):
+        valori = {k: (v.strip() if isinstance(v, str) else v) for k, v in valori.items()}
+        if cfg.get("prefisso") and not valori.get("codice"):
+            valori["codice"] = codice_libero()
+        cols = [c["k"] for c in campi]
+        try:
+            if rid:
+                db.execute(f"UPDATE {tabella} SET " + ", ".join(f"{c}=?" for c in cols) + " WHERE id=?",
+                           tuple(valori[c] for c in cols) + (rid,))
+            else:
+                db.execute(f"INSERT INTO {tabella} ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})",
+                           tuple(valori[c] for c in cols))
+        except sqlite3.IntegrityError:
+            st.error("Esiste già un elemento con lo stesso codice.")
+            return False
+        return True
+
+    with st.expander(f"➕ Nuovo {cfg['singolare']}", expanded=not rows and not q.strip()):
+        with st.form(f"form_nuovo_{tabella}", clear_on_submit=True):
+            valori = render_campi(f"nuovo_{tabella}", None)
+            invia = st.form_submit_button("Salva")
+        if invia:
+            errori = valida(valori)
+            if errori:
+                for e in errori:
+                    st.error(e)
+            elif salva(None, valori):
+                st.session_state["_flash"] = f"{cfg['singolare'].capitalize()} salvato."
+                st.rerun()
+
+    if rows:
+        with st.expander(f"✏️ Modifica o elimina un {cfg['singolare']}"):
+            per_id = {r["id"]: r for r in rows}
+            rid = st.selectbox("Seleziona", list(per_id), key=f"sel_{tabella}",
+                               format_func=lambda i: cfg["label"](per_id[i]))
+            with st.form(f"form_mod_{tabella}_{rid}"):
+                valori = render_campi(f"mod_{tabella}_{rid}", per_id[rid])
+                invia = st.form_submit_button("Salva modifiche")
+            if invia:
+                errori = valida(valori)
+                if errori:
+                    for e in errori:
+                        st.error(e)
+                elif salva(rid, valori):
+                    st.session_state["_flash"] = "Modifiche salvate."
+                    st.rerun()
+            st.divider()
+            conferma = st.checkbox("Confermo di voler eliminare l'elemento selezionato", key=f"conf_{tabella}_{rid}")
+            if st.button("🗑️ Elimina", disabled=not conferma, key=f"del_{tabella}_{rid}"):
+                db.execute(f"DELETE FROM {tabella} WHERE id=?", (rid,))
+                st.session_state["_flash"] = "Elemento eliminato."
+                st.rerun()
+
+
+def config_crud(db):
+    imp = db.get_imp()
+    return {
+        PAGINA_CLIENTI: dict(
+            tabella="clienti", titolo="👥 Clienti", singolare="cliente",
+            campi=[campo("nome", "Nome *", obbl=True), campo("telefono", "Telefono"), campo("email", "Email"),
+                   campo("pec", "PEC"), campo("indirizzo", "Indirizzo"), campo("piva", "Partita IVA"),
+                   campo("note", "Note", "area")],
+            colonne=[("id", "ID", None), ("nome", "Nome", None), ("telefono", "Telefono", None),
+                     ("email", "Email", None), ("pec", "PEC", None), ("indirizzo", "Indirizzo", None),
+                     ("piva", "P.IVA", None), ("note", "Note", None)],
+            ricerca=["nome", "email", "piva", "telefono"],
+            label=lambda r: r["nome"],
+        ),
+        PAGINA_MATERIALI: dict(
+            tabella="materiali", titolo="📦 Materiali", singolare="materiale", prefisso="MAT",
+            campi=[campo("codice", "Codice (vuoto = automatico)"), campo("nome", "Nome *", obbl=True),
+                   campo("prezzo", "Prezzo acquisto (€) *", "float", pos=True, default=1.0),
+                   campo("unita", "U.M. (es. m², m, pz, kg)", default="m²"),
+                   campo("sfrido", "Sfrido %", "float", step=1.0, default=float(imp.get("sfrido_generale", 10.0)))],
+            colonne=[("id", "ID", None), ("codice", "Codice", None), ("nome", "Nome materiale", None),
+                     ("prezzo", "Prezzo acquisto", eur), ("unita", "U.M.", None),
+                     ("sfrido", "Sfrido", lambda v: f"{v:.0f}%")],
+            ricerca=["nome", "codice"],
+            label=lambda r: f"{r['codice'] or '-'} · {r['nome']}",
+        ),
+        PAGINA_LAVORAZIONI: dict(
+            tabella="lavorazioni", titolo="🛠️ Lavorazioni", singolare="lavorazione", prefisso="LAV",
+            campi=[campo("codice", "Codice (vuoto = automatico)"), campo("nome", "Nome *", obbl=True),
+                   campo("costo_orario", "Costo orario (€/h) *", "float", pos=True, default=40.0),
+                   campo("unita", "U.M. (es. h, m², pz)", default="h"),
+                   campo("ore_um", "Ore per U.M. *", "float", pos=True, step=0.25, default=1.0)],
+            colonne=[("id", "ID", None), ("codice", "Codice", None), ("nome", "Nome lavorazione", None),
+                     ("costo_orario", "Costo orario", lambda v: eur(v) + "/h"), ("unita", "U.M.", None),
+                     ("ore_um", "Ore/U.M.", lambda v: f"{v:.2f} h")],
+            ricerca=["nome", "codice"],
+            label=lambda r: f"{r['codice'] or '-'} · {r['nome']}",
+        ),
+    }
+
+
+# ---- Impostazioni -----------------------------------------------------------
+def pagina_impostazioni(db):
+    st.header("⚙️ Impostazioni")
+    rows = db.query("SELECT chiave, valore, unita FROM impostazioni ORDER BY rowid")
+    st.caption("Parametri generali, paga oraria e ricarichi.")
+    with st.form("form_impostazioni"):
+        cols = st.columns(2)
+        valori = {}
+        for i, r in enumerate(rows):
+            etichetta = r["chiave"].replace("_", " ").capitalize() + (f" ({r['unita']})" if r["unita"] else "")
+            valori[r["chiave"]] = cols[i % 2].number_input(etichetta, min_value=0.0, value=float(r["valore"]),
+                                                            step=0.5, format="%.2f", key=f"imp_{r['chiave']}")
+        salva = st.form_submit_button("💾 Salva impostazioni")
+    if salva:
+        with db.conn() as con:
+            for k, v in valori.items():
+                con.execute("UPDATE impostazioni SET valore=? WHERE chiave=?", (v, k))
+        st.session_state["_flash"] = "Impostazioni aggiornate."
+        st.rerun()
+
+    with st.expander("ℹ️ Guida e formule di calcolo"):
+        st.markdown(
+            "- **Costo materiale** = Prezzo acquisto × Q.tà × (1 + Sfrido / 100)\n"
+            "- **Costo lavorazione / manodopera** = Costo orario × Ore\n"
+            "- **Costo trasporto** = Km × Costo al km\n"
+            "- **Prezzo di vendita di una riga** = Costo × (1 + Ricarico di categoria / 100) × (1 + Markup finale / 100). "
+            "Il ricarico è quello dei materiali per i materiali, quello della manodopera per lavorazioni e personale; "
+            "il trasporto riceve solo il markup finale.\n"
+            "- **Imponibile** = somma dei prezzi di vendita delle righe\n"
+            "- **IVA** = Imponibile × IVA %\n"
+            "- **Spese generali**: non entrano nel prezzo, servono a calcolare il costo aziendale e quindi il margine reale "
+            "(Costi diretti × (1 + Spese generali / 100)).\n"
+            "- **Sfrido generale** è il valore proposto quando si crea un nuovo materiale."
+        )
+
+
+# ---- Preventivi (elenco e azioni) ---------------------------------------------
+def pagina_preventivi(db):
+    st.header("📋 Preventivi")
+    st.button("➕ Nuovo preventivo", on_click=nuova_bozza)
+    rows = db.query("SELECT * FROM preventivi ORDER BY id DESC")
+    if not rows:
+        st.info("Non ci sono ancora preventivi. Creane uno con «Nuovo preventivo».")
+        return
+
+    st.dataframe(pd.DataFrame([{
+        "ID": r["id"], "Titolo": r["titolo"], "Rev.": f"Rev.{r['revisione'] or 0}", "Cliente": r["cliente"],
+        "Imponibile": eur(r["imponibile"] or 0), "Ivato": eur(r["ivato"] or 0), "Stato": r["stato"],
+        "Consegna": fmt_data(r["data_consegna"]),
+    } for r in rows]), hide_index=True)
+
+    st.divider()
+    per_id = {r["id"]: r for r in rows}
+    pid = st.selectbox("Seleziona un preventivo", list(per_id), key="prev_sel",
+                       format_func=lambda i: f"#{i} · {per_id[i]['titolo']} · Rev.{per_id[i]['revisione'] or 0} · {per_id[i]['cliente']}")
+    p = per_id[pid]
+
+    st.button("📋 Modifica / Revisiona (crea una nuova revisione)", on_click=carica_revisione, args=(pid,))
+
+    st.subheader(f"🔍 Dettaglio #{p['id']} (Rev.{p['revisione'] or 0}) · {p['titolo']}")
+    st.caption(f"Cliente: {p['cliente']} · Stato: {p['stato']} · Inizio: {fmt_data(p['data_inizio'])} · "
+               f"Consegna: {fmt_data(p['data_consegna'])}")
+    voci = db.query("SELECT tipo, nome, qta, um, ore, prezzo_vendita FROM voci_preventivo WHERE preventivo_id=? ORDER BY id", (pid,))
+    if voci:
+        st.dataframe(pd.DataFrame([{
+            "Tipo": v["tipo"], "Nome": v["nome"], "Q.tà": num(v["qta"] or 0), "U.M.": v["um"],
+            "Ore": f"{num(v['ore'])} h" if v["ore"] else "-", "Prezzo di vendita": eur(v["prezzo_vendita"] or 0),
+        } for v in voci]), hide_index=True)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Imponibile", eur(p["imponibile"] or 0))
+    c2.metric("IVA", eur(p["iva"] or 0))
+    c3.metric("Totale ivato", eur(p["ivato"] or 0))
+
+    st.subheader("📥 Esporta")
+    nome_base = f"Preventivo_{pid}_{nome_file_sicuro(p['titolo'])}"
+    e1, e2, e3 = st.columns(3)
+    if REPORTLAB_AVAILABLE:
+        e1.download_button("📄 Scarica PDF", genera_pdf(db, pid), file_name=f"{nome_base}.pdf",
+                           mime="application/pdf", key=f"pdf_{pid}")
+    else:
+        e1.error("ReportLab non installato: PDF non disponibile.")
+    e2.download_button("📊 Scarica Excel", genera_excel(db, pid), file_name=f"{nome_base}.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"xls_{pid}")
+    ordine = genera_ordine_materiali(db, pid)
+    if ordine:
+        e3.download_button("📦 Ordine materiali", ordine, file_name=f"Ordine_Materiali_Prev_{pid}.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"ord_{pid}")
+    else:
+        e3.caption("Nessun materiale in questo preventivo.")
+
+    st.subheader("🔄 Stato")
+    s1, s2 = st.columns([3, 1], vertical_alignment="bottom")
+    nuovo_stato = s1.selectbox("Stato del preventivo", STATI, index=STATI.index(p["stato"]) if p["stato"] in STATI else 0,
+                               key=f"stato_{pid}_{p['stato']}")
+    if s2.button("Aggiorna stato", key=f"btn_stato_{pid}"):
+        db.execute("UPDATE preventivi SET stato=? WHERE id=?", (nuovo_stato, pid))
+        st.session_state["_flash"] = f"Stato del preventivo #{pid} aggiornato a «{nuovo_stato}»."
+        st.rerun()
+
+    with st.expander("🗑️ Elimina preventivo"):
+        conferma = st.checkbox("Confermo di voler eliminare questo preventivo", key=f"conf_del_prev_{pid}")
+        if st.button("Elimina definitivamente", disabled=not conferma, key=f"del_prev_{pid}"):
+            db.execute("DELETE FROM preventivi WHERE id=?", (pid,))
+            st.session_state["_flash"] = f"Preventivo #{pid} eliminato."
+            st.rerun()
+
+
+# ---- Composizione preventivo --------------------------------------------------
+def pagina_composer(db):
+    ss = st.session_state
+    imp = db.get_imp()
+    st.header("📝 Composizione / revisione preventivo")
+    if ss["d_padre"]:
+        st.info(f"Stai creando la **Rev.{ss['d_rev']}** del preventivo #{ss['d_padre']}. "
+                "Modifica quello che serve e salva: il preventivo originale resta invariato.")
+        st.button("Annulla revisione e parti da zero", on_click=nuova_bozza)
+
+    # -- dati generali
+    clienti = [r["nome"] for r in db.query("SELECT nome FROM clienti ORDER BY nome")]
+    if ss.get("d_cliente") and ss["d_cliente"] not in clienti:
+        clienti.append(ss["d_cliente"])  # cliente della revisione non più in anagrafica
+    with st.container(border=True):
+        st.subheader("Dati generali")
+        g1, g2 = st.columns(2)
+        g1.text_input("Titolo progetto *", key="d_titolo")
+        g2.selectbox("Cliente *", clienti, index=None, placeholder="Scegli un cliente…", key="d_cliente")
+        if not clienti:
+            g2.caption("Nessun cliente in anagrafica: aggiungilo dalla pagina «Clienti».")
+        g3, g4 = st.columns(2)
+        g3.date_input("Inizio lavori", key="d_inizio", format="DD/MM/YYYY")
+        g4.date_input("Consegna", key="d_consegna", format="DD/MM/YYYY")
+
+    # -- materiali
+    materiali = {m["id"]: m for m in db.query("SELECT * FROM materiali ORDER BY nome")}
+    with st.container(border=True):
+        st.subheader("Aggiungi materiale")
+        if not materiali:
+            st.caption("Il listino materiali è vuoto: aggiungi i materiali dalla pagina «Materiali».")
+        else:
+            m1, m2, m3 = st.columns([3, 1, 1], vertical_alignment="bottom")
+            sel = m1.selectbox("Materiale", list(materiali), index=None, placeholder="Scegli un materiale…",
+                               key="d_mat_sel",
+                               format_func=lambda i: f"{materiali[i]['nome']} ({materiali[i]['unita']}) · {eur(materiali[i]['prezzo'])}")
+            m2.number_input("Quantità", min_value=0.01, step=1.0, format="%.2f", key="d_mat_qta")
+            if m3.button("➕ Aggiungi", key="btn_add_mat"):
+                if sel is None:
+                    st.warning("Scegli prima un materiale.")
+                else:
+                    m = materiali[sel]
+                    qta = float(ss["d_mat_qta"])
+                    costo = m["prezzo"] * qta * (1 + (m["sfrido"] or 0) / 100.0)
+                    ss["d_voci"].append({"tipo": TIPO_MATERIALE, "nome": m["nome"], "qta": qta, "um": m["unita"],
+                                         "ore": 0.0, "costo_base": costo})
+
+    # -- lavorazioni
+    lavorazioni = {l["id"]: l for l in db.query("SELECT * FROM lavorazioni ORDER BY nome")}
+
+    def aggiorna_ore_lavorazione():
+        lid = ss.get("d_lav_sel")
+        if lid in lavorazioni:
+            ss["d_lav_ore"] = round(float(ss["d_lav_qta"]) * float(lavorazioni[lid]["ore_um"] or 1.0), 2)
+
+    with st.container(border=True):
+        st.subheader("Aggiungi lavorazione di laboratorio")
+        if not lavorazioni:
+            st.caption("Il listino lavorazioni è vuoto: aggiungile dalla pagina «Lavorazioni».")
+        else:
+            l1, l2, l3, l4 = st.columns([3, 1, 1, 1], vertical_alignment="bottom")
+            sel_l = l1.selectbox("Lavorazione", list(lavorazioni), index=None, placeholder="Scegli una lavorazione…",
+                                 key="d_lav_sel", on_change=aggiorna_ore_lavorazione,
+                                 format_func=lambda i: f"{lavorazioni[i]['nome']} ({lavorazioni[i]['unita']}) · {eur(lavorazioni[i]['costo_orario'])}/h")
+            l2.number_input("Quantità", min_value=0.01, step=1.0, format="%.2f", key="d_lav_qta",
+                            on_change=aggiorna_ore_lavorazione)
+            l3.number_input("Ore totali", min_value=0.0, step=0.5, format="%.2f", key="d_lav_ore",
+                            help="Proposte come Quantità × Ore/U.M. della lavorazione; puoi modificarle.")
+            if l4.button("➕ Aggiungi", key="btn_add_lav"):
+                if sel_l is None:
+                    st.warning("Scegli prima una lavorazione.")
+                elif float(ss["d_lav_ore"]) <= 0:
+                    st.warning("Le ore devono essere maggiori di zero.")
+                else:
+                    l = lavorazioni[sel_l]
+                    ore = float(ss["d_lav_ore"])
+                    ss["d_voci"].append({"tipo": TIPO_LAVORAZIONE, "nome": l["nome"], "qta": float(ss["d_lav_qta"]),
+                                         "um": l["unita"], "ore": ore, "costo_base": ore * l["costo_orario"]})
+
+    # -- voci inserite
+    with st.container(border=True):
+        st.subheader("Voci inserite")
+        voci = ss["d_voci"]
+        if voci:
+            calc_voci = calcola(voci, {}, 0, imp)["righe"]
+            st.dataframe(pd.DataFrame([{
+                "N.": i + 1, "Tipo": r["tipo"], "Nome": r["nome"], "Q.tà": num(r["qta"]), "U.M.": r["um"],
+                "Ore": f"{num(r['ore'])} h" if r["ore"] else "-", "Costo": eur(r["costo_base"]),
+                "Vendita": eur(r["prezzo"]),
+            } for i, r in enumerate(calc_voci)]), hide_index=True)
+            st.multiselect("Voci da rimuovere", list(range(len(voci))), key="d_rimuovi",
+                           format_func=lambda i: f"{i + 1} · {voci[i]['nome']}")
+            st.button("🗑️ Rimuovi voci selezionate", on_click=rimuovi_voci_selezionate)
+        else:
+            st.caption("Nessuna voce inserita.")
+
+    # -- personale e trasporto
+    with st.container(border=True):
+        st.subheader("Cantiere, trasporto e personale operativo")
+        cols = st.columns(3)
+        for i, (chiave, etichetta, _, _, _) in enumerate(RUOLI):
+            cols[i % 3].number_input(f"Ore {etichetta}", min_value=0.0, step=0.5, format="%.2f", key=f"d_ore_{chiave}")
+        st.number_input("Km trasporto A/R", min_value=0.0, step=1.0, format="%.1f", key="d_km")
+
+    # -- riepilogo
+    ore_ruoli = {r[0]: ss.get(f"d_ore_{r[0]}", 0.0) for r in RUOLI}
+    calc = calcola(voci, ore_ruoli, float(ss.get("d_km") or 0), imp)
+    with st.container(border=True):
+        st.subheader("Riepilogo")
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("Imponibile", eur(calc["imponibile"]))
+        r2.metric(f"IVA ({num(calc['iva_perc'])}%)", eur(calc["iva"]))
+        r3.metric("Totale ivato", eur(calc["ivato"]))
+        r4.metric("Margine reale", f"{calc['margine']:.1f}%")
+        if calc["righe"]:
+            with st.expander("Dettaglio righe del preventivo"):
+                st.dataframe(pd.DataFrame([{
+                    "Tipo": r["tipo"], "Descrizione": r["nome"], "Q.tà": num(r["qta"]), "U.M.": r["um"],
+                    "Costo": eur(r["costo_base"]), "Prezzo": eur(r["prezzo"]),
+                } for r in calc["righe"]]), hide_index=True)
+        err = ss.pop("_err_comp", None)
+        if err:
+            st.error(err)
+        st.button("💾 Calcola e salva preventivo", type="primary", on_click=salva_bozza)
+
+
+# ---- Dati e backup ------------------------------------------------------------
+def pagina_dati(db):
+    st.header("💾 Dati e backup")
+    st.warning(
+        "**Attenzione:** su Streamlit Community Cloud il disco non è permanente. Se l'app viene riavviata, "
+        "ripubblicata o resta a lungo inattiva, i dati inseriti possono andare persi. "
+        "**Scarica un backup a fine giornata** e, se serve, ripristinalo da qui sotto."
+    )
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+    st.download_button("⬇️ Scarica backup completo (database)", db.esporta_bytes(),
+                       file_name=f"gestionale_scenografia_{stamp}.db", mime="application/octet-stream")
+
+    ver = st.session_state.setdefault("_up_ver", 0)
+    st.subheader("Ripristina da backup")
+    f = st.file_uploader("Carica un file .db (anche quello creato dalla versione desktop)", type=["db", "sqlite", "sqlite3"],
+                         key=f"up_db_{ver}")
+    if f is not None:
+        st.caption("Il database attuale verrà sostituito (ne viene fatta prima una copia di sicurezza).")
+        ok_ripr = st.checkbox("Confermo il ripristino", key=f"conf_ripr_{ver}")
+        if st.button("Ripristina", disabled=not ok_ripr):
+            ok, msg = db.ripristina_da_bytes(f.getvalue())
+            if ok:
+                st.session_state["_up_ver"] = ver + 1
+                st.session_state["_flash"] = msg
+                st.rerun()
+            else:
+                st.error(msg)
+
+    st.subheader("Importa listino da Excel")
+    st.caption("Fogli attesi: «Listino_Materiali» e «Listino_Lavorazioni». I codici già presenti vengono saltati.")
+    x = st.file_uploader("Carica il listino (.xlsx)", type=["xlsx"], key=f"up_xls_{ver}")
+    if x is not None and st.button("Importa listino"):
+        try:
+            n_mat, n_lav = db.importa_listino(x)
+            st.session_state["_up_ver"] = ver + 1
+            st.session_state["_flash"] = f"Importati {n_mat} materiali e {n_lav} lavorazioni."
+            st.rerun()
+        except Exception as e:
+            st.error(f"Impossibile leggere il file: {e}")
+
+
+# ==============================================================================
+# 6. APPLICAZIONE
+# ==============================================================================
+def check_password():
+    """Se nei Secrets è definita APP_PASSWORD, l'app richiede la password."""
+    try:
+        password = st.secrets["APP_PASSWORD"]
+    except Exception:
+        return True
+    if st.session_state.get("_auth"):
+        return True
+    st.title("🔒 Gestionale Preventivi")
+    with st.form("login"):
+        inserita = st.text_input("Password", type="password")
+        entra = st.form_submit_button("Entra")
+    if entra:
+        if hmac.compare_digest(inserita.encode(), str(password).encode()):
+            st.session_state["_auth"] = True
+            st.rerun()
+        else:
+            st.error("Password errata.")
+    return False
+
+
+def main():
+    st.set_page_config(page_title="Gestionale Preventivi Scenografici", page_icon="🎭", layout="wide")
+    if not check_password():
+        st.stop()
+
+    db = get_db()
+    keep_draft_alive()
+    ensure_draft()
+
+    with st.sidebar:
+        st.title("🎭 Gestionale Preventivi")
+        st.caption("Scenografia cinema e teatro")
+        st.radio("Menu", PAGINE, key="pagina", label_visibility="collapsed")
+
+    mostra_flash()
+    pagina = st.session_state.get("pagina", PAGINA_DASHBOARD)
+    if pagina == PAGINA_DASHBOARD:
+        pagina_dashboard(db)
+    elif pagina == PAGINA_PREVENTIVI:
+        pagina_preventivi(db)
+    elif pagina == PAGINA_COMPOSER:
+        pagina_composer(db)
+    elif pagina in (PAGINA_CLIENTI, PAGINA_MATERIALI, PAGINA_LAVORAZIONI):
+        pagina_crud(db, config_crud(db)[pagina])
+    elif pagina == PAGINA_IMPOSTAZIONI:
+        pagina_impostazioni(db)
+    elif pagina == PAGINA_DATI:
+        pagina_dati(db)
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = GestionaleScenografia(root)
-    root.mainloop()
+    main()
