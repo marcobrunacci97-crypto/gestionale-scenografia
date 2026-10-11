@@ -1,11 +1,3 @@
-# -*- coding: utf-8 -*-
-# ==============================================================================
-# GESTIONALE PREVENTIVI SCENOGRAFIA CINEMA E TEATRO  -  versione web (Streamlit)
-# ==============================================================================
-# Avvio in locale:   streamlit run app.py
-# Pubblicazione:     GitHub + Streamlit Community Cloud (file principale: app.py)
-# ==============================================================================
-
 import datetime
 import hmac
 import io
@@ -129,149 +121,150 @@ def nome_file_sicuro(testo):
 
 
 # ==============================================================================
-# LISTINO COMPLETO (Estratto da Listino_Allestimenti_Scenografici.xlsx)
+# LISTINO DI PARTENZA (da Listino_Allestimenti_Scenografici.xlsx)
+# Caricato automaticamente quando le tabelle materiali / lavorazioni sono vuote.
 # ==============================================================================
-# (codice, nome, U.M., costo acquisto €, sfrido %)
+# (codice, nome, U.M., prezzo di acquisto €, sfrido %)
 LISTINO_MATERIALI = [
-    ('LEG-001', 'Multistrato pioppo 4-6 mm', 'm²', 9.0, 15.0),
-    ('LEG-002', 'Multistrato pioppo 10 mm', 'm²', 12.0, 15.0),
-    ('LEG-003', 'Multistrato pioppo 15 mm', 'm²', 16.0, 15.0),
-    ('LEG-004', 'Multistrato betulla 12-15 mm', 'm²', 24.0, 12.0),
-    ('LEG-005', 'Multistrato betulla 18 mm', 'm²', 32.0, 12.0),
-    ('LEG-006', 'OSB 9-12 mm', 'm²', 7.0, 15.0),
-    ('LEG-007', 'OSB 15-18 mm', 'm²', 9.5, 15.0),
-    ('LEG-008', 'MDF 6 mm', 'm²', 7.0, 12.0),
-    ('LEG-009', 'MDF 10 mm', 'm²', 9.5, 12.0),
-    ('LEG-010', 'MDF 19 mm', 'm²', 16.0, 12.0),
-    ('LEG-011', 'Truciolare nobilitato', 'm²', 15.0, 10.0),
-    ('LEG-012', 'Listello abete', 'ml', 3.0, 10.0),
-    ('LEG-013', 'Listello strutturale in legno', 'ml', 4.0, 10.0),
-    ('LEG-014', 'Pedana in legno - materiale', 'm²', 22.0, 10.0),
-    ('FER-001', 'Tubolare quadro ferro 20x20', 'ml', 3.0, 10.0),
-    ('FER-002', 'Tubolare quadro ferro 30x30', 'ml', 4.5, 10.0),
-    ('FER-003', 'Tubolare quadro ferro 40x40', 'ml', 6.0, 10.0),
-    ('FER-004', 'Tubolare quadro ferro 50x50', 'ml', 8.0, 10.0),
-    ('FER-005', 'Tubolare rettangolare ferro', 'ml', 6.0, 10.0),
-    ('FER-006', 'Tubo tondo ferro', 'ml', 5.0, 10.0),
-    ('FER-007', 'Angolare ferro', 'ml', 4.0, 10.0),
-    ('FER-008', 'Piattina ferro', 'ml', 3.5, 10.0),
-    ('FER-009', 'Lamiera ferro', 'm²', 25.0, 10.0),
-    ('FER-010', 'Profilo alluminio', 'ml', 12.0, 8.0),
-    ('FER-011', 'Lamiera alluminio', 'm²', 38.0, 8.0),
-    ('ED-001', 'Lastra cartongesso standard', 'm²', 6.5, 10.0),
-    ('ED-002', 'Lastra cartongesso ignifuga', 'm²', 11.0, 10.0),
-    ('ED-003', 'Profilo metallico cartongesso', 'ml', 2.5, 10.0),
-    ('ED-004', 'Stucco cartongesso', 'kg', 1.8, 10.0),
-    ('ED-005', 'Rasante', 'kg', 1.5, 10.0),
-    ('ED-006', 'Primer/fondo', 'L', 6.0, 10.0),
-    ('SC-001', 'Polistirolo EPS', 'm³', 180.0, 12.0),
-    ('SC-002', 'Polistirene estruso XPS', 'm³', 260.0, 12.0),
-    ('SC-003', 'Poliuretano espanso', 'm³', 450.0, 12.0),
-    ('SC-004', 'Gommapiuma', 'm³', 350.0, 12.0),
-    ('SC-005', 'Forex/PVC espanso 3-5 mm', 'm²', 14.0, 10.0),
-    ('SC-006', 'Plexiglass', 'm²', 45.0, 8.0),
-    ('SC-007', 'Policarbonato', 'm²', 38.0, 8.0),
-    ('COL-001', 'Pittura murale', 'L', 5.5, 10.0),
-    ('COL-002', 'Smalto', 'L', 12.0, 10.0),
-    ('COL-003', 'Vernice trasparente', 'L', 14.0, 10.0),
-    ('COL-004', 'Resina', 'kg', 14.0, 10.0),
-    ('COL-005', 'Stucco decorativo', 'kg', 5.0, 10.0),
-    ('TES-001', 'Moquette standard', 'm²', 8.0, 10.0),
-    ('TES-002', 'Moquette premium', 'm²', 16.0, 10.0),
-    ('TES-003', 'Tessuto scenografico', 'ml', 15.0, 10.0),
-    ('TES-004', 'Velluto', 'ml', 28.0, 10.0),
-    ('TES-005', 'Lycra', 'ml', 14.0, 10.0),
-    ('TES-006', 'TNT', 'ml', 3.0, 10.0),
-    ('TES-007', 'Tela stampabile', 'm²', 18.0, 8.0),
-    ('GRA-001', 'PVC banner', 'm²', 8.0, 8.0),
-    ('GRA-002', 'Vinile adesivo', 'm²', 12.0, 8.0),
-    ('GRA-003', 'Forex stampato', 'm²', 22.0, 8.0),
-    ('GRA-004', 'Dibond stampato', 'm²', 35.0, 8.0),
-    ('GRA-005', 'Canvas stampato', 'm²', 24.0, 8.0),
-    ('GRA-006', 'Pellicola trasparente', 'm²', 14.0, 8.0),
-    ('ELE-001', 'Strip LED', 'ml', 12.0, 5.0),
-    ('ELE-002', 'Profilo alluminio LED', 'ml', 10.0, 5.0),
-    ('ELE-003', 'Alimentatore LED', 'pz', 25.0, 3.0),
-    ('ELE-004', 'Faretto LED', 'pz', 30.0, 3.0),
-    ('ELE-005', 'Cavo elettrico', 'ml', 1.8, 5.0),
-    ('ELE-006', 'Multipresa/ciabatta', 'pz', 12.0, 3.0),
-    ('ELE-007', 'Quadro elettrico', 'pz', 120.0, 3.0),
-    ('FER-012', 'Viti e minuteria strutturale', 'kg', 6.0, 8.0),
-    ('FER-013', 'Bulloneria', 'kg', 8.0, 8.0),
-    ('FER-014', "Cavo d'acciaio", 'ml', 2.5, 5.0),
-    ('FER-015', 'Catena', 'ml', 5.0, 5.0),
-    ('MON-001', 'Ruote industriali', 'pz', 18.0, 3.0),
-    ('MON-002', 'Piedino regolabile', 'pz', 8.0, 3.0),
-    ('MON-003', 'Piastra/base metallica', 'pz', 18.0, 5.0),
-    ('FIN-001', 'Carta abrasiva', 'pz', 1.2, 5.0),
-    ('FIN-002', 'Nastro carta', 'pz', 3.0, 5.0),
-    ('FIN-003', 'Silicone/adesivo', 'pz', 6.0, 5.0),
-    ('FIN-004', 'Colla strutturale', 'kg', 15.0, 8.0),
-    ('FIN-005', 'Schiuma poliuretanica', 'pz', 8.0, 8.0),
-    ('FIN-006', 'Telo protettivo', 'm²', 2.5, 5.0),
-    ('FIN-007', 'Biadesivo professionale', 'ml', 2.5, 5.0),
-    ('FIN-008', 'Velcro professionale', 'ml', 4.5, 5.0),
-    ('FIN-009', 'Profilo PVC finitura', 'ml', 3.5, 5.0),
-    ('FIN-010', 'Angolare PVC', 'ml', 3.0, 5.0),
-    ('FIN-011', 'Lamiera zincata', 'm²', 18.0, 8.0),
-    ('FIN-012', 'Rete metallica', 'm²', 12.0, 8.0),
-    ('FIN-013', 'Tessuto oscurante', 'm²', 10.0, 10.0),
-    ('FIN-014', 'Pannello fonoassorbente', 'm²', 28.0, 8.0),
-    ('FIN-015', 'Materiale ignifugo spray', 'L', 18.0, 8.0),
+    ('LEG-001', 'Multistrato pioppo 4-6 mm', 'm²', 9, 15),
+    ('LEG-002', 'Multistrato pioppo 10 mm', 'm²', 12, 15),
+    ('LEG-003', 'Multistrato pioppo 15 mm', 'm²', 16, 15),
+    ('LEG-004', 'Multistrato betulla 12-15 mm', 'm²', 24, 12),
+    ('LEG-005', 'Multistrato betulla 18 mm', 'm²', 32, 12),
+    ('LEG-006', 'OSB 9-12 mm', 'm²', 7, 15),
+    ('LEG-007', 'OSB 15-18 mm', 'm²', 9.5, 15),
+    ('LEG-008', 'MDF 6 mm', 'm²', 7, 12),
+    ('LEG-009', 'MDF 10 mm', 'm²', 9.5, 12),
+    ('LEG-010', 'MDF 19 mm', 'm²', 16, 12),
+    ('LEG-011', 'Truciolare nobilitato', 'm²', 15, 10),
+    ('LEG-012', 'Listello abete', 'ml', 3, 10),
+    ('LEG-013', 'Listello strutturale in legno', 'ml', 4, 10),
+    ('LEG-014', 'Pedana in legno - materiale', 'm²', 22, 10),
+    ('FER-001', 'Tubolare quadro ferro 20x20', 'ml', 3, 10),
+    ('FER-002', 'Tubolare quadro ferro 30x30', 'ml', 4.5, 10),
+    ('FER-003', 'Tubolare quadro ferro 40x40', 'ml', 6, 10),
+    ('FER-004', 'Tubolare quadro ferro 50x50', 'ml', 8, 10),
+    ('FER-005', 'Tubolare rettangolare ferro', 'ml', 6, 10),
+    ('FER-006', 'Tubo tondo ferro', 'ml', 5, 10),
+    ('FER-007', 'Angolare ferro', 'ml', 4, 10),
+    ('FER-008', 'Piattina ferro', 'ml', 3.5, 10),
+    ('FER-009', 'Lamiera ferro', 'm²', 25, 10),
+    ('FER-010', 'Profilo alluminio', 'ml', 12, 8),
+    ('FER-011', 'Lamiera alluminio', 'm²', 38, 8),
+    ('ED-001', 'Lastra cartongesso standard', 'm²', 6.5, 10),
+    ('ED-002', 'Lastra cartongesso ignifuga', 'm²', 11, 10),
+    ('ED-003', 'Profilo metallico cartongesso', 'ml', 2.5, 10),
+    ('ED-004', 'Stucco cartongesso', 'kg', 1.8, 10),
+    ('ED-005', 'Rasante', 'kg', 1.5, 10),
+    ('ED-006', 'Primer/fondo', 'L', 6, 10),
+    ('SC-001', 'Polistirolo EPS', 'm³', 180, 12),
+    ('SC-002', 'Polistirene estruso XPS', 'm³', 260, 12),
+    ('SC-003', 'Poliuretano espanso', 'm³', 450, 12),
+    ('SC-004', 'Gommapiuma', 'm³', 350, 12),
+    ('SC-005', 'Forex/PVC espanso 3-5 mm', 'm²', 14, 10),
+    ('SC-006', 'Plexiglass', 'm²', 45, 8),
+    ('SC-007', 'Policarbonato', 'm²', 38, 8),
+    ('COL-001', 'Pittura murale', 'L', 5.5, 10),
+    ('COL-002', 'Smalto', 'L', 12, 10),
+    ('COL-003', 'Vernice trasparente', 'L', 14, 10),
+    ('COL-004', 'Resina', 'kg', 14, 10),
+    ('COL-005', 'Stucco decorativo', 'kg', 5, 10),
+    ('TES-001', 'Moquette standard', 'm²', 8, 10),
+    ('TES-002', 'Moquette premium', 'm²', 16, 10),
+    ('TES-003', 'Tessuto scenografico', 'ml', 15, 10),
+    ('TES-004', 'Velluto', 'ml', 28, 10),
+    ('TES-005', 'Lycra', 'ml', 14, 10),
+    ('TES-006', 'TNT', 'ml', 3, 10),
+    ('TES-007', 'Tela stampabile', 'm²', 18, 8),
+    ('GRA-001', 'PVC banner', 'm²', 8, 8),
+    ('GRA-002', 'Vinile adesivo', 'm²', 12, 8),
+    ('GRA-003', 'Forex stampato', 'm²', 22, 8),
+    ('GRA-004', 'Dibond stampato', 'm²', 35, 8),
+    ('GRA-005', 'Canvas stampato', 'm²', 24, 8),
+    ('GRA-006', 'Pellicola trasparente', 'm²', 14, 8),
+    ('ELE-001', 'Strip LED', 'ml', 12, 5),
+    ('ELE-002', 'Profilo alluminio LED', 'ml', 10, 5),
+    ('ELE-003', 'Alimentatore LED', 'pz', 25, 3),
+    ('ELE-004', 'Faretto LED', 'pz', 30, 3),
+    ('ELE-005', 'Cavo elettrico', 'ml', 1.8, 5),
+    ('ELE-006', 'Multipresa/ciabatta', 'pz', 12, 3),
+    ('ELE-007', 'Quadro elettrico', 'pz', 120, 3),
+    ('FER-012', 'Viti e minuteria strutturale', 'kg', 6, 8),
+    ('FER-013', 'Bulloneria', 'kg', 8, 8),
+    ('FER-014', "Cavo d'acciaio", 'ml', 2.5, 5),
+    ('FER-015', 'Catena', 'ml', 5, 5),
+    ('MON-001', 'Ruote industriali', 'pz', 18, 3),
+    ('MON-002', 'Piedino regolabile', 'pz', 8, 3),
+    ('MON-003', 'Piastra/base metallica', 'pz', 18, 5),
+    ('FIN-001', 'Carta abrasiva', 'pz', 1.2, 5),
+    ('FIN-002', 'Nastro carta', 'pz', 3, 5),
+    ('FIN-003', 'Silicone/adesivo', 'pz', 6, 5),
+    ('FIN-004', 'Colla strutturale', 'kg', 15, 8),
+    ('FIN-005', 'Schiuma poliuretanica', 'pz', 8, 8),
+    ('FIN-006', 'Telo protettivo', 'm²', 2.5, 5),
+    ('FIN-007', 'Biadesivo professionale', 'ml', 2.5, 5),
+    ('FIN-008', 'Velcro professionale', 'ml', 4.5, 5),
+    ('FIN-009', 'Profilo PVC finitura', 'ml', 3.5, 5),
+    ('FIN-010', 'Angolare PVC', 'ml', 3, 5),
+    ('FIN-011', 'Lamiera zincata', 'm²', 18, 8),
+    ('FIN-012', 'Rete metallica', 'm²', 12, 8),
+    ('FIN-013', 'Tessuto oscurante', 'm²', 10, 10),
+    ('FIN-014', 'Pannello fonoassorbente', 'm²', 28, 8),
+    ('FIN-015', 'Materiale ignifugo spray', 'L', 18, 8),
 ]
 
-# (codice, nome, U.M., costo orario €, ore per U.M.)
+# (codice, nome, U.M., costo orario €/h, ore per U.M.)
 LISTINO_LAVORAZIONI = [
-    ('LAV-001', 'Taglio pannello', 'm²', 40.0, 0.15),
-    ('LAV-002', 'Taglio pannello sagomato', 'pezzo', 40.0, 0.5),
-    ('LAV-003', 'Assemblaggio struttura in legno', 'm²', 40.0, 0.5),
-    ('LAV-004', 'Assemblaggio mobile/bancone', 'pezzo', 45.0, 4.0),
-    ('LAV-005', 'Saldatura struttura semplice', 'ml', 45.0, 0.3),
-    ('LAV-006', 'Saldatura struttura complessa', 'kg', 45.0, 0.15),
-    ('LAV-007', 'Montaggio struttura metallica', 'm²', 45.0, 0.8),
-    ('LAV-008', 'Verniciatura ferro', 'm²', 40.0, 0.45),
-    ('LAV-009', 'Taglio CNC', 'm²', 55.0, 0.25),
-    ('LAV-010', 'Lavorazione polistirolo CNC', 'm³', 50.0, 1.0),
-    ('LAV-011', 'Rivestimento indurente polistirolo', 'm²', 40.0, 0.4),
-    ('LAV-012', 'Rasatura elemento scenografico', 'm²', 40.0, 0.35),
-    ('LAV-013', 'Cartongesso parete standard', 'm²', 40.0, 1.0),
-    ('LAV-014', 'Cartongesso doppia lastra', 'm²', 40.0, 1.35),
-    ('LAV-015', 'Cartongesso curvo', 'm²', 45.0, 1.5),
-    ('LAV-016', 'Controsoffitto cartongesso', 'm²', 40.0, 1.1),
-    ('LAV-017', 'Velette/cassonetti cartongesso', 'ml', 42.0, 0.9),
-    ('LAV-018', 'Stuccatura', 'm²', 38.0, 0.2),
-    ('LAV-019', 'Carteggiatura', 'm²', 38.0, 0.15),
-    ('LAV-020', 'Primer/fondo applicazione', 'm²', 38.0, 0.12),
-    ('LAV-021', 'Pittura semplice', 'm²', 38.0, 0.2),
-    ('LAV-022', 'Pittura multicolore', 'm²', 40.0, 0.35),
-    ('LAV-023', 'Effetto cemento', 'm²', 45.0, 0.5),
-    ('LAV-024', 'Effetto marmo', 'm²', 50.0, 0.8),
-    ('LAV-025', 'Effetto legno', 'm²', 45.0, 0.6),
-    ('LAV-026', "Trompe-l'œil", 'm²', 55.0, 1.8),
-    ('LAV-027', 'Decorazione artistica', 'm²', 50.0, 1.2),
-    ('LAV-028', 'Patinatura/invecchiamento', 'm²', 45.0, 0.5),
-    ('LAV-029', 'Applicazione tessuto', 'm²', 38.0, 0.25),
-    ('LAV-030', 'Cucitura tessuto', 'ml', 35.0, 0.15),
-    ('LAV-031', 'Applicazione adesivo', 'm²', 38.0, 0.2),
-    ('LAV-032', 'Montaggio LED', 'ml', 42.0, 0.2),
-    ('LAV-033', 'Installazione elettrica', 'ora', 45.0, 1.0),
-    ('LAV-034', 'Cablaggio', 'ml', 45.0, 0.15),
-    ('LAV-035', 'Montaggio generale', 'ora', 40.0, 1.0),
-    ('LAV-036', 'Smontaggio generale', 'ora', 40.0, 1.0),
-    ('LAV-037', 'Facchinaggio', 'ora', 30.0, 1.0),
-    ('LAV-038', 'Preparazione laboratorio', 'ora', 35.0, 1.0),
-    ('LAV-039', 'Progettazione scenografica', 'ora', 60.0, 1.0),
-    ('LAV-040', 'Disegno tecnico CAD', 'ora', 55.0, 1.0),
-    ('LAV-041', 'Modellazione 3D', 'ora', 60.0, 1.0),
-    ('LAV-042', 'Render', 'pezzo', 60.0, 2.0),
-    ('LAV-043', 'Grafica esecutiva', 'ora', 50.0, 1.0),
-    ('LAV-044', 'Project management', 'ora', 55.0, 1.0),
-    ('LAV-045', 'Imballaggio', 'pezzo', 35.0, 0.5),
-    ('LAV-046', 'Carico/scarico', 'ora', 30.0, 1.0),
-    ('LAV-047', 'Trasporto furgone', 'viaggio', 0.0, 1.0),
-    ('LAV-048', 'Trasporto camion', 'viaggio', 0.0, 1.0),
-    ('LAV-049', 'Stoccaggio', 'm³/mese', 0.0, 1.0),
-    ('LAV-050', 'Smaltimento', 'm³', 0.0, 1.0),
+    ('LAV-001', 'Taglio pannello', 'm²', 40, 0.15),
+    ('LAV-002', 'Taglio pannello sagomato', 'pezzo', 40, 0.5),
+    ('LAV-003', 'Assemblaggio struttura in legno', 'm²', 40, 0.5),
+    ('LAV-004', 'Assemblaggio mobile/bancone', 'pezzo', 45, 4),
+    ('LAV-005', 'Saldatura struttura semplice', 'ml', 45, 0.3),
+    ('LAV-006', 'Saldatura struttura complessa', 'kg', 45, 0.15),
+    ('LAV-007', 'Montaggio struttura metallica', 'm²', 45, 0.8),
+    ('LAV-008', 'Verniciatura ferro', 'm²', 40, 0.45),
+    ('LAV-009', 'Taglio CNC', 'm²', 55, 0.25),
+    ('LAV-010', 'Lavorazione polistirolo CNC', 'm³', 50, 1),
+    ('LAV-011', 'Rivestimento indurente polistirolo', 'm²', 40, 0.4),
+    ('LAV-012', 'Rasatura elemento scenografico', 'm²', 40, 0.35),
+    ('LAV-013', 'Cartongesso parete standard', 'm²', 40, 1),
+    ('LAV-014', 'Cartongesso doppia lastra', 'm²', 40, 1.35),
+    ('LAV-015', 'Cartongesso curvo', 'm²', 45, 1.5),
+    ('LAV-016', 'Controsoffitto cartongesso', 'm²', 40, 1.1),
+    ('LAV-017', 'Velette/cassonetti cartongesso', 'ml', 42, 0.9),
+    ('LAV-018', 'Stuccatura', 'm²', 38, 0.2),
+    ('LAV-019', 'Carteggiatura', 'm²', 38, 0.15),
+    ('LAV-020', 'Primer/fondo applicazione', 'm²', 38, 0.12),
+    ('LAV-021', 'Pittura semplice', 'm²', 38, 0.2),
+    ('LAV-022', 'Pittura multicolore', 'm²', 40, 0.35),
+    ('LAV-023', 'Effetto cemento', 'm²', 45, 0.5),
+    ('LAV-024', 'Effetto marmo', 'm²', 50, 0.8),
+    ('LAV-025', 'Effetto legno', 'm²', 45, 0.6),
+    ('LAV-026', "Trompe-l'œil", 'm²', 55, 1.8),
+    ('LAV-027', 'Decorazione artistica', 'm²', 50, 1.2),
+    ('LAV-028', 'Patinatura/invecchiamento', 'm²', 45, 0.5),
+    ('LAV-029', 'Applicazione tessuto', 'm²', 38, 0.25),
+    ('LAV-030', 'Cucitura tessuto', 'ml', 35, 0.15),
+    ('LAV-031', 'Applicazione adesivo', 'm²', 38, 0.2),
+    ('LAV-032', 'Montaggio LED', 'ml', 42, 0.2),
+    ('LAV-033', 'Installazione elettrica', 'ora', 45, 1),
+    ('LAV-034', 'Cablaggio', 'ml', 45, 0.15),
+    ('LAV-035', 'Montaggio generale', 'ora', 40, 1),
+    ('LAV-036', 'Smontaggio generale', 'ora', 40, 1),
+    ('LAV-037', 'Facchinaggio', 'ora', 30, 1),
+    ('LAV-038', 'Preparazione laboratorio', 'ora', 35, 1),
+    ('LAV-039', 'Progettazione scenografica', 'ora', 60, 1),
+    ('LAV-040', 'Disegno tecnico CAD', 'ora', 55, 1),
+    ('LAV-041', 'Modellazione 3D', 'ora', 60, 1),
+    ('LAV-042', 'Render', 'pezzo', 60, 2),
+    ('LAV-043', 'Grafica esecutiva', 'ora', 50, 1),
+    ('LAV-044', 'Project management', 'ora', 55, 1),
+    ('LAV-045', 'Imballaggio', 'pezzo', 35, 0.5),
+    ('LAV-046', 'Carico/scarico', 'ora', 30, 1),
+    ('LAV-047', 'Trasporto furgone', 'viaggio', 0, 1),
+    ('LAV-048', 'Trasporto camion', 'viaggio', 0, 1),
+    ('LAV-049', 'Stoccaggio', 'm³/mese', 0, 1),
+    ('LAV-050', 'Smaltimento', 'm³', 0, 1),
 ]
 
 
@@ -286,11 +279,12 @@ class DatabaseManager:
         self.init_db()
         self.carica_listino_iniziale()
 
+    # ---- accesso ----------------------------------------------------------
     @contextmanager
     def conn(self):
         con = sqlite3.connect(self.db_path)
         con.row_factory = sqlite3.Row
-        con.execute("PRAGMA foreign_keys = ON")
+        con.execute("PRAGMA foreign_keys = ON")  # necessario per ON DELETE CASCADE
         try:
             yield con
             con.commit()
@@ -308,6 +302,7 @@ class DatabaseManager:
         with self.conn() as con:
             return con.execute(sql, params).lastrowid
 
+    # ---- backup -----------------------------------------------------------
     def backup_automatico(self):
         if not os.path.exists(self.db_path):
             return
@@ -318,10 +313,11 @@ class DatabaseManager:
             vecchi = sorted(f for f in os.listdir(BACKUP_DIR) if f.endswith(".db"))
             for f in vecchi[:-MAX_BACKUP_LOCALI]:
                 os.remove(os.path.join(BACKUP_DIR, f))
-        except Exception as e:
+        except Exception as e:  # il backup non deve mai bloccare l'app
             print(f"[BACKUP] Errore: {e}")
 
     def esporta_bytes(self):
+        """Copia coerente del database, da scaricare."""
         try:
             with self.conn() as con:
                 return con.serialize()
@@ -330,6 +326,7 @@ class DatabaseManager:
                 return f.read()
 
     def ripristina_da_bytes(self, dati):
+        """Sostituisce il database con quello caricato. Ritorna (ok, messaggio)."""
         tmp = self.db_path + ".upload"
         try:
             with open(tmp, "wb") as f:
@@ -353,6 +350,7 @@ class DatabaseManager:
             if os.path.exists(tmp):
                 os.remove(tmp)
 
+    # ---- struttura --------------------------------------------------------
     def init_db(self):
         with self.conn() as con:
             c = con.cursor()
@@ -448,10 +446,14 @@ class DatabaseManager:
                 c.execute("UPDATE impostazioni SET unita=? WHERE chiave=? AND (unita IS NULL OR unita='')",
                           (unita, chiave))
 
+    # ---- impostazioni -----------------------------------------------------
     def get_imp(self):
         return {r["chiave"]: r["valore"] for r in self.query("SELECT chiave, valore FROM impostazioni")}
 
+    # ---- listino Excel ----------------------------------------------------
     def importa_listino(self, sorgente):
+        """Importa materiali e lavorazioni da un file Excel (percorso o file caricato).
+        I codici già presenti vengono ignorati. Ritorna (n_materiali, n_lavorazioni)."""
         xls = pd.ExcelFile(sorgente)
         n_mat = n_lav = 0
 
@@ -470,10 +472,10 @@ class DatabaseManager:
                     if not nome:
                         continue
                     sfrido = numero(r, "Sfrido %", 0.10)
-                    sfrido = sfrido * 100 if sfrido < 1 else sfrido
+                    sfrido = sfrido * 100 if sfrido < 1 else sfrido  # 0.10 oppure 10 -> 10 %
                     codice = testo(r, "Codice") or None
                     if codice is None and con.execute("SELECT 1 FROM materiali WHERE nome=?", (nome,)).fetchone():
-                        continue
+                        continue  # senza codice il vincolo UNIQUE non protegge: confronto per nome
                     cur = con.execute(
                         "INSERT OR IGNORE INTO materiali (codice, nome, unita, prezzo, sfrido) VALUES (?, ?, ?, ?, ?)",
                         (codice, nome, testo(r, "U.M.", "pz"), numero(r, "Costo acquisto (€)", 0.0), sfrido))
@@ -494,22 +496,7 @@ class DatabaseManager:
         return n_mat, n_lav
 
     def carica_listino_iniziale(self):
-        """Carica prioritariamente dal file Excel se presente, altrimenti popola con il listino completo incorporato."""
-        excel_path = os.path.join(BASE_DIR, "Listino_Allestimenti_Scenografici.xlsx")
-        
-        # Prova prima a caricare dal file Excel se esiste
-        if os.path.exists(excel_path):
-            try:
-                with self.conn() as con:
-                    mat_count = con.execute("SELECT COUNT(*) FROM materiali").fetchone()[0]
-                    lav_count = con.execute("SELECT COUNT(*) FROM lavorazioni").fetchone()[0]
-                if mat_count == 0 or lav_count == 0:
-                    self.importa_listino(excel_path)
-                    return
-            except Exception as e:
-                print(f"[LISTINO] Errore lettura Excel automatico: {e}")
-
-        # Inserisce sempre i dati di fallback se le tabelle sono vuote
+        """Se le tabelle sono vuote, le riempie con il listino incorporato nel programma."""
         with self.conn() as con:
             if con.execute("SELECT COUNT(*) FROM materiali").fetchone()[0] == 0:
                 con.executemany(
@@ -520,6 +507,7 @@ class DatabaseManager:
                     "INSERT OR IGNORE INTO lavorazioni (codice, nome, unita, costo_orario, ore_um) VALUES (?, ?, ?, ?, ?)",
                     [(c, n, u, co, o) for c, n, u, co, o in LISTINO_LAVORAZIONI])
 
+    # ---- preventivi -------------------------------------------------------
     def salva_preventivo(self, titolo, cliente, inizio, consegna, km, calc, revisione, padre_id):
         costo_trasporto = sum(r["costo_base"] for r in calc["righe"] if r["tipo"] == TIPO_LOGISTICA)
         with self.conn() as con:
@@ -548,6 +536,12 @@ def get_db():
 # 2. CALCOLO DEL PREVENTIVO
 # ==============================================================================
 def calcola(voci, ore_ruoli, km, imp):
+    """Calcola righe e totali.
+
+    Ogni riga ha un prezzo di vendita già comprensivo di ricarico di categoria
+    (materiali / manodopera) e di markup finale: la somma delle righe coincide
+    quindi con l'imponibile mostrato nel PDF.
+    """
     def g(chiave, default):
         return float(imp.get(chiave, default))
 
@@ -731,12 +725,15 @@ def ensure_draft():
 
 
 def keep_draft_alive():
+    """Streamlit cancella il valore dei widget non disegnati: riassegnandolo a ogni
+    esecuzione la bozza sopravvive quando si cambia pagina."""
     for k in DRAFT_WIDGET_KEYS:
         if k in st.session_state:
             st.session_state[k] = st.session_state[k]
 
 
 def carica_revisione(pid):
+    """Callback: copia un preventivo nella bozza come nuova revisione."""
     db = get_db()
     p = db.query("SELECT * FROM preventivi WHERE id=?", (pid,))
     if not p:
@@ -775,6 +772,7 @@ def rimuovi_voci_selezionate():
 
 
 def salva_bozza():
+    """Callback del pulsante 'Calcola e salva'."""
     ss = st.session_state
     db = get_db()
     titolo = (ss.get("d_titolo") or "").strip()
@@ -815,7 +813,7 @@ def pagina_dashboard(db):
         """SELECT p.id, p.titolo, p.cliente, p.data_consegna, p.stato, p.imponibile, p.ivato, p.costo_diretto
            FROM preventivi p
            WHERE NOT EXISTS (SELECT 1 FROM preventivi r WHERE r.padre_id = p.id)"""
-    )
+    )  # solo l'ultima revisione di ciascun preventivo
     totali = len(rows)
     vinti = sum(1 for r in rows if r["stato"] in STATI_VINTI)
     attivi = [r for r in rows if r["stato"] != "Rifiutato"]
@@ -845,6 +843,23 @@ def pagina_dashboard(db):
         st.dataframe(pd.DataFrame([x[1] for x in sorted(prossimi, key=lambda x: x[0])]), hide_index=True)
     else:
         st.info("Nessun cantiere in consegna.")
+
+    with st.expander("ℹ️ Guida indicatori (cosa sono e come si calcolano)"):
+        st.markdown(
+            "Gli indicatori considerano **solo l'ultima revisione** di ciascun preventivo, "
+            "così le revisioni non vengono contate più volte.\n\n"
+            "**Tasso di conversione** – percentuale di preventivi che diventano contratti. "
+            "(Preventivi *Approvato*, *In Lavorazione* o *Completato* ÷ Preventivi totali) × 100.\n\n"
+            "**Fatturato pipeline (imponibile)** – somma degli imponibili (IVA esclusa) dei preventivi "
+            "non rifiutati.\n\n"
+            "**Margine medio reale** – [(Imponibile − Costi aziendali) ÷ Imponibile] × 100, sui preventivi non "
+            "rifiutati. I costi aziendali sono i costi diretti maggiorati delle spese generali."
+        )
+
+
+# ---- CRUD generico (clienti, materiali, lavorazioni) ------------------------
+def campo(k, label, tipo="text", **kw):
+    return {"k": k, "label": label, "tipo": tipo, **kw}
 
 
 def pagina_crud(db, cfg):
@@ -954,10 +969,6 @@ def pagina_crud(db, cfg):
                 st.rerun()
 
 
-def campo(k, label, tipo="text", **kw):
-    return {"k": k, "label": label, "tipo": tipo, **kw}
-
-
 def config_crud(db):
     imp = db.get_imp()
     return {
@@ -999,6 +1010,7 @@ def config_crud(db):
     }
 
 
+# ---- Impostazioni -----------------------------------------------------------
 def pagina_impostazioni(db):
     st.header("⚙️ Impostazioni")
     rows = db.query("SELECT chiave, valore, unita FROM impostazioni ORDER BY rowid")
@@ -1018,7 +1030,23 @@ def pagina_impostazioni(db):
         st.session_state["_flash"] = "Impostazioni aggiornate."
         st.rerun()
 
+    with st.expander("ℹ️ Guida e formule di calcolo"):
+        st.markdown(
+            "- **Costo materiale** = Prezzo acquisto × Q.tà × (1 + Sfrido / 100)\n"
+            "- **Costo lavorazione / manodopera** = Costo orario × Ore\n"
+            "- **Costo trasporto** = Km × Costo al km\n"
+            "- **Prezzo di vendita di una riga** = Costo × (1 + Ricarico di categoria / 100) × (1 + Markup finale / 100). "
+            "Il ricarico è quello dei materiali per i materiali, quello della manodopera per lavorazioni e personale; "
+            "il trasporto riceve solo il markup finale.\n"
+            "- **Imponibile** = somma dei prezzi di vendita delle righe\n"
+            "- **IVA** = Imponibile × IVA %\n"
+            "- **Spese generali**: non entrano nel prezzo, servono a calcolare il costo aziendale e quindi il margine reale "
+            "(Costi diretti × (1 + Spese generali / 100)).\n"
+            "- **Sfrido generale** è il valore proposto quando si crea un nuovo materiale."
+        )
 
+
+# ---- Preventivi (elenco e azioni) ---------------------------------------------
 def pagina_preventivi(db):
     st.header("📋 Preventivi")
     st.button("➕ Nuovo preventivo", on_click=nuova_bozza)
@@ -1089,6 +1117,7 @@ def pagina_preventivi(db):
             st.rerun()
 
 
+# ---- Composizione preventivo --------------------------------------------------
 def pagina_composer(db):
     ss = st.session_state
     imp = db.get_imp()
@@ -1098,9 +1127,10 @@ def pagina_composer(db):
                 "Modifica quello che serve e salva: il preventivo originale resta invariato.")
         st.button("Annulla revisione e parti da zero", on_click=nuova_bozza)
 
+    # -- dati generali
     clienti = [r["nome"] for r in db.query("SELECT nome FROM clienti ORDER BY nome")]
     if ss.get("d_cliente") and ss["d_cliente"] not in clienti:
-        clienti.append(ss["d_cliente"])
+        clienti.append(ss["d_cliente"])  # cliente della revisione non più in anagrafica
     with st.container(border=True):
         st.subheader("Dati generali")
         g1, g2 = st.columns(2)
@@ -1112,6 +1142,7 @@ def pagina_composer(db):
         g3.date_input("Inizio lavori", key="d_inizio", format="DD/MM/YYYY")
         g4.date_input("Consegna", key="d_consegna", format="DD/MM/YYYY")
 
+    # -- materiali
     materiali = {m["id"]: m for m in db.query("SELECT * FROM materiali ORDER BY nome")}
     with st.container(border=True):
         st.subheader("Aggiungi materiale")
@@ -1133,6 +1164,7 @@ def pagina_composer(db):
                     ss["d_voci"].append({"tipo": TIPO_MATERIALE, "nome": m["nome"], "qta": qta, "um": m["unita"],
                                          "ore": 0.0, "costo_base": costo})
 
+    # -- lavorazioni
     lavorazioni = {l["id"]: l for l in db.query("SELECT * FROM lavorazioni ORDER BY nome")}
 
     def aggiorna_ore_lavorazione():
@@ -1164,6 +1196,7 @@ def pagina_composer(db):
                     ss["d_voci"].append({"tipo": TIPO_LAVORAZIONE, "nome": l["nome"], "qta": float(ss["d_lav_qta"]),
                                          "um": l["unita"], "ore": ore, "costo_base": ore * l["costo_orario"]})
 
+    # -- voci inserite
     with st.container(border=True):
         st.subheader("Voci inserite")
         voci = ss["d_voci"]
@@ -1180,6 +1213,7 @@ def pagina_composer(db):
         else:
             st.caption("Nessuna voce inserita.")
 
+    # -- personale e trasporto
     with st.container(border=True):
         st.subheader("Cantiere, trasporto e personale operativo")
         cols = st.columns(3)
@@ -1187,6 +1221,7 @@ def pagina_composer(db):
             cols[i % 3].number_input(f"Ore {etichetta}", min_value=0.0, step=0.5, format="%.2f", key=f"d_ore_{chiave}")
         st.number_input("Km trasporto A/R", min_value=0.0, step=1.0, format="%.1f", key="d_km")
 
+    # -- riepilogo
     ore_ruoli = {r[0]: ss.get(f"d_ore_{r[0]}", 0.0) for r in RUOLI}
     calc = calcola(voci, ore_ruoli, float(ss.get("d_km") or 0), imp)
     with st.container(border=True):
@@ -1208,6 +1243,7 @@ def pagina_composer(db):
         st.button("💾 Calcola e salva preventivo", type="primary", on_click=salva_bozza)
 
 
+# ---- Dati e backup ------------------------------------------------------------
 def pagina_dati(db):
     st.header("💾 Dati e backup")
     st.warning(
@@ -1252,6 +1288,7 @@ def pagina_dati(db):
 # 6. APPLICAZIONE
 # ==============================================================================
 def check_password():
+    """Se nei Secrets è definita APP_PASSWORD, l'app richiede la password."""
     try:
         password = st.secrets["APP_PASSWORD"]
     except Exception:
