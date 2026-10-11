@@ -1,3 +1,4 @@
+
 import datetime
 import hmac
 import io
@@ -25,7 +26,6 @@ except ImportError:  # il PDF viene disattivato, il resto dell'app funziona
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("GESTIONALE_DB", os.path.join(BASE_DIR, "gestionale_scenografia.db"))
 BACKUP_DIR = os.path.join(os.path.dirname(DB_PATH), "backups")
-LISTINO_XLSX = os.path.join(BASE_DIR, "Listino_Allestimenti_Scenografici.xlsx")
 MAX_BACKUP_LOCALI = 20
 
 STATI = ["Bozza", "Inviato", "Approvato", "Rifiutato", "In Lavorazione", "Completato"]
@@ -122,6 +122,154 @@ def nome_file_sicuro(testo):
 
 
 # ==============================================================================
+# LISTINO DI PARTENZA (da Listino_Allestimenti_Scenografici.xlsx)
+# Caricato automaticamente quando le tabelle materiali / lavorazioni sono vuote.
+# ==============================================================================
+# (codice, nome, U.M., prezzo di acquisto €, sfrido %)
+LISTINO_MATERIALI = [
+    ('LEG-001', 'Multistrato pioppo 4-6 mm', 'm²', 9, 15),
+    ('LEG-002', 'Multistrato pioppo 10 mm', 'm²', 12, 15),
+    ('LEG-003', 'Multistrato pioppo 15 mm', 'm²', 16, 15),
+    ('LEG-004', 'Multistrato betulla 12-15 mm', 'm²', 24, 12),
+    ('LEG-005', 'Multistrato betulla 18 mm', 'm²', 32, 12),
+    ('LEG-006', 'OSB 9-12 mm', 'm²', 7, 15),
+    ('LEG-007', 'OSB 15-18 mm', 'm²', 9.5, 15),
+    ('LEG-008', 'MDF 6 mm', 'm²', 7, 12),
+    ('LEG-009', 'MDF 10 mm', 'm²', 9.5, 12),
+    ('LEG-010', 'MDF 19 mm', 'm²', 16, 12),
+    ('LEG-011', 'Truciolare nobilitato', 'm²', 15, 10),
+    ('LEG-012', 'Listello abete', 'ml', 3, 10),
+    ('LEG-013', 'Listello strutturale in legno', 'ml', 4, 10),
+    ('LEG-014', 'Pedana in legno - materiale', 'm²', 22, 10),
+    ('FER-001', 'Tubolare quadro ferro 20x20', 'ml', 3, 10),
+    ('FER-002', 'Tubolare quadro ferro 30x30', 'ml', 4.5, 10),
+    ('FER-003', 'Tubolare quadro ferro 40x40', 'ml', 6, 10),
+    ('FER-004', 'Tubolare quadro ferro 50x50', 'ml', 8, 10),
+    ('FER-005', 'Tubolare rettangolare ferro', 'ml', 6, 10),
+    ('FER-006', 'Tubo tondo ferro', 'ml', 5, 10),
+    ('FER-007', 'Angolare ferro', 'ml', 4, 10),
+    ('FER-008', 'Piattina ferro', 'ml', 3.5, 10),
+    ('FER-009', 'Lamiera ferro', 'm²', 25, 10),
+    ('FER-010', 'Profilo alluminio', 'ml', 12, 8),
+    ('FER-011', 'Lamiera alluminio', 'm²', 38, 8),
+    ('ED-001', 'Lastra cartongesso standard', 'm²', 6.5, 10),
+    ('ED-002', 'Lastra cartongesso ignifuga', 'm²', 11, 10),
+    ('ED-003', 'Profilo metallico cartongesso', 'ml', 2.5, 10),
+    ('ED-004', 'Stucco cartongesso', 'kg', 1.8, 10),
+    ('ED-005', 'Rasante', 'kg', 1.5, 10),
+    ('ED-006', 'Primer/fondo', 'L', 6, 10),
+    ('SC-001', 'Polistirolo EPS', 'm³', 180, 12),
+    ('SC-002', 'Polistirene estruso XPS', 'm³', 260, 12),
+    ('SC-003', 'Poliuretano espanso', 'm³', 450, 12),
+    ('SC-004', 'Gommapiuma', 'm³', 350, 12),
+    ('SC-005', 'Forex/PVC espanso 3-5 mm', 'm²', 14, 10),
+    ('SC-006', 'Plexiglass', 'm²', 45, 8),
+    ('SC-007', 'Policarbonato', 'm²', 38, 8),
+    ('COL-001', 'Pittura murale', 'L', 5.5, 10),
+    ('COL-002', 'Smalto', 'L', 12, 10),
+    ('COL-003', 'Vernice trasparente', 'L', 14, 10),
+    ('COL-004', 'Resina', 'kg', 14, 10),
+    ('COL-005', 'Stucco decorativo', 'kg', 5, 10),
+    ('TES-001', 'Moquette standard', 'm²', 8, 10),
+    ('TES-002', 'Moquette premium', 'm²', 16, 10),
+    ('TES-003', 'Tessuto scenografico', 'ml', 15, 10),
+    ('TES-004', 'Velluto', 'ml', 28, 10),
+    ('TES-005', 'Lycra', 'ml', 14, 10),
+    ('TES-006', 'TNT', 'ml', 3, 10),
+    ('TES-007', 'Tela stampabile', 'm²', 18, 8),
+    ('GRA-001', 'PVC banner', 'm²', 8, 8),
+    ('GRA-002', 'Vinile adesivo', 'm²', 12, 8),
+    ('GRA-003', 'Forex stampato', 'm²', 22, 8),
+    ('GRA-004', 'Dibond stampato', 'm²', 35, 8),
+    ('GRA-005', 'Canvas stampato', 'm²', 24, 8),
+    ('GRA-006', 'Pellicola trasparente', 'm²', 14, 8),
+    ('ELE-001', 'Strip LED', 'ml', 12, 5),
+    ('ELE-002', 'Profilo alluminio LED', 'ml', 10, 5),
+    ('ELE-003', 'Alimentatore LED', 'pz', 25, 3),
+    ('ELE-004', 'Faretto LED', 'pz', 30, 3),
+    ('ELE-005', 'Cavo elettrico', 'ml', 1.8, 5),
+    ('ELE-006', 'Multipresa/ciabatta', 'pz', 12, 3),
+    ('ELE-007', 'Quadro elettrico', 'pz', 120, 3),
+    ('FER-012', 'Viti e minuteria strutturale', 'kg', 6, 8),
+    ('FER-013', 'Bulloneria', 'kg', 8, 8),
+    ('FER-014', "Cavo d'acciaio", 'ml', 2.5, 5),
+    ('FER-015', 'Catena', 'ml', 5, 5),
+    ('MON-001', 'Ruote industriali', 'pz', 18, 3),
+    ('MON-002', 'Piedino regolabile', 'pz', 8, 3),
+    ('MON-003', 'Piastra/base metallica', 'pz', 18, 5),
+    ('FIN-001', 'Carta abrasiva', 'pz', 1.2, 5),
+    ('FIN-002', 'Nastro carta', 'pz', 3, 5),
+    ('FIN-003', 'Silicone/adesivo', 'pz', 6, 5),
+    ('FIN-004', 'Colla strutturale', 'kg', 15, 8),
+    ('FIN-005', 'Schiuma poliuretanica', 'pz', 8, 8),
+    ('FIN-006', 'Telo protettivo', 'm²', 2.5, 5),
+    ('FIN-007', 'Biadesivo professionale', 'ml', 2.5, 5),
+    ('FIN-008', 'Velcro professionale', 'ml', 4.5, 5),
+    ('FIN-009', 'Profilo PVC finitura', 'ml', 3.5, 5),
+    ('FIN-010', 'Angolare PVC', 'ml', 3, 5),
+    ('FIN-011', 'Lamiera zincata', 'm²', 18, 8),
+    ('FIN-012', 'Rete metallica', 'm²', 12, 8),
+    ('FIN-013', 'Tessuto oscurante', 'm²', 10, 10),
+    ('FIN-014', 'Pannello fonoassorbente', 'm²', 28, 8),
+    ('FIN-015', 'Materiale ignifugo spray', 'L', 18, 8),
+]
+
+# (codice, nome, U.M., costo orario €/h, ore per U.M.)
+LISTINO_LAVORAZIONI = [
+    ('LAV-001', 'Taglio pannello', 'm²', 40, 0.15),
+    ('LAV-002', 'Taglio pannello sagomato', 'pezzo', 40, 0.5),
+    ('LAV-003', 'Assemblaggio struttura in legno', 'm²', 40, 0.5),
+    ('LAV-004', 'Assemblaggio mobile/bancone', 'pezzo', 45, 4),
+    ('LAV-005', 'Saldatura struttura semplice', 'ml', 45, 0.3),
+    ('LAV-006', 'Saldatura struttura complessa', 'kg', 45, 0.15),
+    ('LAV-007', 'Montaggio struttura metallica', 'm²', 45, 0.8),
+    ('LAV-008', 'Verniciatura ferro', 'm²', 40, 0.45),
+    ('LAV-009', 'Taglio CNC', 'm²', 55, 0.25),
+    ('LAV-010', 'Lavorazione polistirolo CNC', 'm³', 50, 1),
+    ('LAV-011', 'Rivestimento indurente polistirolo', 'm²', 40, 0.4),
+    ('LAV-012', 'Rasatura elemento scenografico', 'm²', 40, 0.35),
+    ('LAV-013', 'Cartongesso parete standard', 'm²', 40, 1),
+    ('LAV-014', 'Cartongesso doppia lastra', 'm²', 40, 1.35),
+    ('LAV-015', 'Cartongesso curvo', 'm²', 45, 1.5),
+    ('LAV-016', 'Controsoffitto cartongesso', 'm²', 40, 1.1),
+    ('LAV-017', 'Velette/cassonetti cartongesso', 'ml', 42, 0.9),
+    ('LAV-018', 'Stuccatura', 'm²', 38, 0.2),
+    ('LAV-019', 'Carteggiatura', 'm²', 38, 0.15),
+    ('LAV-020', 'Primer/fondo applicazione', 'm²', 38, 0.12),
+    ('LAV-021', 'Pittura semplice', 'm²', 38, 0.2),
+    ('LAV-022', 'Pittura multicolore', 'm²', 40, 0.35),
+    ('LAV-023', 'Effetto cemento', 'm²', 45, 0.5),
+    ('LAV-024', 'Effetto marmo', 'm²', 50, 0.8),
+    ('LAV-025', 'Effetto legno', 'm²', 45, 0.6),
+    ('LAV-026', "Trompe-l'œil", 'm²', 55, 1.8),
+    ('LAV-027', 'Decorazione artistica', 'm²', 50, 1.2),
+    ('LAV-028', 'Patinatura/invecchiamento', 'm²', 45, 0.5),
+    ('LAV-029', 'Applicazione tessuto', 'm²', 38, 0.25),
+    ('LAV-030', 'Cucitura tessuto', 'ml', 35, 0.15),
+    ('LAV-031', 'Applicazione adesivo', 'm²', 38, 0.2),
+    ('LAV-032', 'Montaggio LED', 'ml', 42, 0.2),
+    ('LAV-033', 'Installazione elettrica', 'ora', 45, 1),
+    ('LAV-034', 'Cablaggio', 'ml', 45, 0.15),
+    ('LAV-035', 'Montaggio generale', 'ora', 40, 1),
+    ('LAV-036', 'Smontaggio generale', 'ora', 40, 1),
+    ('LAV-037', 'Facchinaggio', 'ora', 30, 1),
+    ('LAV-038', 'Preparazione laboratorio', 'ora', 35, 1),
+    ('LAV-039', 'Progettazione scenografica', 'ora', 60, 1),
+    ('LAV-040', 'Disegno tecnico CAD', 'ora', 55, 1),
+    ('LAV-041', 'Modellazione 3D', 'ora', 60, 1),
+    ('LAV-042', 'Render', 'pezzo', 60, 2),
+    ('LAV-043', 'Grafica esecutiva', 'ora', 50, 1),
+    ('LAV-044', 'Project management', 'ora', 55, 1),
+    ('LAV-045', 'Imballaggio', 'pezzo', 35, 0.5),
+    ('LAV-046', 'Carico/scarico', 'ora', 30, 1),
+    ('LAV-047', 'Trasporto furgone', 'viaggio', 0, 1),
+    ('LAV-048', 'Trasporto camion', 'viaggio', 0, 1),
+    ('LAV-049', 'Stoccaggio', 'm³/mese', 0, 1),
+    ('LAV-050', 'Smaltimento', 'm³', 0, 1),
+]
+
+
+# ==============================================================================
 # 1. DATABASE
 # ==============================================================================
 class DatabaseManager:
@@ -130,7 +278,7 @@ class DatabaseManager:
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self.backup_automatico()
         self.init_db()
-        self.importa_listino_se_vuoto()
+        self.carica_listino_iniziale()
 
     # ---- accesso ----------------------------------------------------------
     @contextmanager
@@ -348,14 +496,17 @@ class DatabaseManager:
                     n_lav += cur.rowcount
         return n_mat, n_lav
 
-    def importa_listino_se_vuoto(self):
-        if not os.path.exists(LISTINO_XLSX):
-            return
-        if self.query("SELECT COUNT(*) AS n FROM materiali")[0]["n"] == 0:
-            try:
-                self.importa_listino(LISTINO_XLSX)
-            except Exception as e:
-                print(f"Errore import listino: {e}")
+    def carica_listino_iniziale(self):
+        """Se le tabelle sono vuote, le riempie con il listino incorporato nel programma."""
+        with self.conn() as con:
+            if con.execute("SELECT COUNT(*) FROM materiali").fetchone()[0] == 0:
+                con.executemany(
+                    "INSERT OR IGNORE INTO materiali (codice, nome, unita, prezzo, sfrido) VALUES (?, ?, ?, ?, ?)",
+                    [(c, n, u, p, s) for c, n, u, p, s in LISTINO_MATERIALI])
+            if con.execute("SELECT COUNT(*) FROM lavorazioni").fetchone()[0] == 0:
+                con.executemany(
+                    "INSERT OR IGNORE INTO lavorazioni (codice, nome, unita, costo_orario, ore_um) VALUES (?, ?, ?, ?, ?)",
+                    [(c, n, u, co, o) for c, n, u, co, o in LISTINO_LAVORAZIONI])
 
     # ---- preventivi -------------------------------------------------------
     def salva_preventivo(self, titolo, cliente, inizio, consegna, km, calc, revisione, padre_id):
@@ -848,7 +999,7 @@ def config_crud(db):
         PAGINA_LAVORAZIONI: dict(
             tabella="lavorazioni", titolo="🛠️ Lavorazioni", singolare="lavorazione", prefisso="LAV",
             campi=[campo("codice", "Codice (vuoto = automatico)"), campo("nome", "Nome *", obbl=True),
-                   campo("costo_orario", "Costo orario (€/h) *", "float", pos=True, default=40.0),
+                   campo("costo_orario", "Costo orario (€/h) *", "float", default=40.0),
                    campo("unita", "U.M. (es. h, m², pz)", default="h"),
                    campo("ore_um", "Ore per U.M. *", "float", pos=True, step=0.25, default=1.0)],
             colonne=[("id", "ID", None), ("codice", "Codice", None), ("nome", "Nome lavorazione", None),
