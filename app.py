@@ -12,6 +12,14 @@ import pandas as pd
 import streamlit as st
 
 try:
+    import openpyxl  # noqa: F401
+    OPENPYXL_AVAILABLE = True
+except ImportError:  # senza openpyxl i download passano a CSV
+    OPENPYXL_AVAILABLE = False
+
+MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+try:
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -495,17 +503,24 @@ class DatabaseManager:
                     n_lav += cur.rowcount
         return n_mat, n_lav
 
-    def carica_listino_iniziale(self):
-        """Se le tabelle sono vuote, le riempie con il listino incorporato nel programma."""
+    def carica_listino_iniziale(self, forza=False):
+        """Riempie materiali e lavorazioni con il listino incorporato nel programma.
+        Automatico una sola volta per database (se le tabelle sono vuote); con forza=True
+        aggiunge le voci mancanti (i codici già presenti vengono saltati)."""
         with self.conn() as con:
-            if con.execute("SELECT COUNT(*) FROM materiali").fetchone()[0] == 0:
-                con.executemany(
+            if not forza and con.execute("PRAGMA user_version").fetchone()[0] >= 1:
+                return 0, 0
+            n_m = n_l = 0
+            if forza or con.execute("SELECT COUNT(*) FROM materiali").fetchone()[0] == 0:
+                n_m = con.executemany(
                     "INSERT OR IGNORE INTO materiali (codice, nome, unita, prezzo, sfrido) VALUES (?, ?, ?, ?, ?)",
-                    [(c, n, u, p, s) for c, n, u, p, s in LISTINO_MATERIALI])
-            if con.execute("SELECT COUNT(*) FROM lavorazioni").fetchone()[0] == 0:
-                con.executemany(
+                    LISTINO_MATERIALI).rowcount
+            if forza or con.execute("SELECT COUNT(*) FROM lavorazioni").fetchone()[0] == 0:
+                n_l = con.executemany(
                     "INSERT OR IGNORE INTO lavorazioni (codice, nome, unita, costo_orario, ore_um) VALUES (?, ?, ?, ?, ?)",
-                    [(c, n, u, co, o) for c, n, u, co, o in LISTINO_LAVORAZIONI])
+                    LISTINO_LAVORAZIONI).rowcount
+            con.execute("PRAGMA user_version = 1")
+            return n_m, n_l
 
     # ---- preventivi -------------------------------------------------------
     def salva_preventivo(self, titolo, cliente, inizio, consegna, km, calc, revisione, padre_id):
@@ -527,9 +542,18 @@ class DatabaseManager:
         return pid
 
 
+APP_VERSION = "2026-10-12 b"
+
+
 @st.cache_resource
-def get_db():
+def _crea_db(versione):
     return DatabaseManager()
+
+
+def get_db():
+    # La versione fa parte della chiave di cache: dopo un aggiornamento del codice
+    # Streamlit non riusa il vecchio gestore del database rimasto in memoria.
+    return _crea_db(APP_VERSION)
 
 
 # ==============================================================================
@@ -661,6 +685,9 @@ def genera_pdf(db, pid):
 
 
 def _excel_bytes(df, nome_foglio):
+    """Ritorna (contenuto, estensione, mime). Excel se openpyxl c'è, altrimenti CSV (apribile da Excel)."""
+    if not OPENPYXL_AVAILABLE:
+        return df.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"), "csv", "text/csv"
     from openpyxl.utils import get_column_letter
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -669,7 +696,7 @@ def _excel_bytes(df, nome_foglio):
         for i, col in enumerate(df.columns, 1):
             larghezza = max([len(str(col))] + [len(str(x)) for x in df[col]]) + 2
             ws.column_dimensions[get_column_letter(i)].width = min(larghezza, 60)
-    return buf.getvalue()
+    return buf.getvalue(), "xlsx", MIME_XLSX
 
 
 def genera_excel(db, pid):
@@ -881,6 +908,11 @@ def pagina_crud(db, cfg):
         st.dataframe(df, hide_index=True)
     else:
         st.info("Nessun elemento trovato.")
+        if cfg.get("prefisso") and not q.strip():
+            if st.button("📥 Carica il listino predefinito", key=f"listino_{tabella}"):
+                n_m, n_l = db.carica_listino_iniziale(forza=True)
+                st.session_state["_flash"] = f"Listino caricato: {n_m} materiali e {n_l} lavorazioni aggiunti."
+                st.rerun()
 
     def render_campi(prefisso, valori):
         out = {}
@@ -1090,15 +1122,20 @@ def pagina_preventivi(db):
         e1.download_button("📄 Scarica PDF", genera_pdf(db, pid), file_name=f"{nome_base}.pdf",
                            mime="application/pdf", key=f"pdf_{pid}")
     else:
-        e1.error("ReportLab non installato: PDF non disponibile.")
-    e2.download_button("📊 Scarica Excel", genera_excel(db, pid), file_name=f"{nome_base}.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"xls_{pid}")
+        e1.warning("PDF non disponibile: manca la libreria «reportlab». "
+                   "Aggiungi il file requirements.txt al repository GitHub (vedi README).")
+    dati, ext, mime = genera_excel(db, pid)
+    e2.download_button("📊 Scarica Excel" if ext == "xlsx" else "📊 Scarica CSV", dati,
+                       file_name=f"{nome_base}.{ext}", mime=mime, key=f"xls_{pid}")
     ordine = genera_ordine_materiali(db, pid)
     if ordine:
-        e3.download_button("📦 Ordine materiali", ordine, file_name=f"Ordine_Materiali_Prev_{pid}.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"ord_{pid}")
+        dati, ext, mime = ordine
+        e3.download_button("📦 Ordine materiali", dati, file_name=f"Ordine_Materiali_Prev_{pid}.{ext}",
+                           mime=mime, key=f"ord_{pid}")
     else:
         e3.caption("Nessun materiale in questo preventivo.")
+    if not (REPORTLAB_AVAILABLE and OPENPYXL_AVAILABLE):
+        st.caption("⚠️ Alcune librerie non sono installate sul server (manca requirements.txt nel repository).")
 
     st.subheader("🔄 Stato")
     s1, s2 = st.columns([3, 1], vertical_alignment="bottom")
@@ -1274,7 +1311,9 @@ def pagina_dati(db):
     st.subheader("Importa listino da Excel")
     st.caption("Fogli attesi: «Listino_Materiali» e «Listino_Lavorazioni». I codici già presenti vengono saltati.")
     x = st.file_uploader("Carica il listino (.xlsx)", type=["xlsx"], key=f"up_xls_{ver}")
-    if x is not None and st.button("Importa listino"):
+    if x is not None and not OPENPYXL_AVAILABLE:
+        st.error("Per leggere file Excel serve la libreria «openpyxl»: aggiungi requirements.txt al repository.")
+    elif x is not None and st.button("Importa listino"):
         try:
             n_mat, n_lav = db.importa_listino(x)
             st.session_state["_up_ver"] = ver + 1
@@ -1314,12 +1353,14 @@ def main():
         st.stop()
 
     db = get_db()
+    db.carica_listino_iniziale()
     keep_draft_alive()
     ensure_draft()
 
     with st.sidebar:
         st.title("🎭 Gestionale Preventivi")
         st.caption("Scenografia cinema e teatro")
+        st.caption(f"Versione programma: {APP_VERSION}")
         st.radio("Menu", PAGINE, key="pagina", label_visibility="collapsed")
 
     mostra_flash()
