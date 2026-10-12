@@ -34,6 +34,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("GESTIONALE_DB", os.path.join(BASE_DIR, "gestionale_scenografia.db"))
 BACKUP_DIR = os.path.join(os.path.dirname(DB_PATH), "backups")
 MAX_BACKUP_LOCALI = 20
+VERSIONE_SCHEMA = 2  # PRAGMA user_version: 2 = listino predefinito già sincronizzato
 
 STATI = ["Bozza", "Inviato", "Approvato", "Rifiutato", "In Lavorazione", "Completato"]
 STATI_VINTI = ("Approvato", "In Lavorazione", "Completato")
@@ -285,7 +286,6 @@ class DatabaseManager:
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self.backup_automatico()
         self.init_db()
-        self.carica_listino_iniziale()
 
     # ---- accesso ----------------------------------------------------------
     @contextmanager
@@ -351,6 +351,8 @@ class DatabaseManager:
             self.backup_automatico()
             os.replace(tmp, self.db_path)
             self.init_db()
+            with self.conn() as con:
+                con.execute(f"PRAGMA user_version = {VERSIONE_SCHEMA}")
             return True, "Database ripristinato."
         except Exception as e:
             return False, f"Errore durante il ripristino: {e}"
@@ -503,24 +505,44 @@ class DatabaseManager:
                     n_lav += cur.rowcount
         return n_mat, n_lav
 
-    def carica_listino_iniziale(self, forza=False):
-        """Riempie materiali e lavorazioni con il listino incorporato nel programma.
-        Automatico una sola volta per database (se le tabelle sono vuote); con forza=True
-        aggiunge le voci mancanti (i codici già presenti vengono saltati)."""
+    def sincronizza_listino(self):
+        """Una tantum per database: sostituisce materiali e lavorazioni con il listino incorporato.
+        Elimina i record che NON fanno parte del listino (es. voci di prova inserite a mano),
+        poi inserisce tutte le voci del listino. I preventivi già salvati non cambiano, perché
+        conservano nome e prezzi delle voci. Ritorna None se già eseguita, altrimenti
+        (materiali eliminati, lavorazioni eliminate, materiali aggiunti, lavorazioni aggiunte)."""
         with self.conn() as con:
-            if not forza and con.execute("PRAGMA user_version").fetchone()[0] >= 1:
-                return 0, 0
-            n_m = n_l = 0
-            if forza or con.execute("SELECT COUNT(*) FROM materiali").fetchone()[0] == 0:
-                n_m = con.executemany(
-                    "INSERT OR IGNORE INTO materiali (codice, nome, unita, prezzo, sfrido) VALUES (?, ?, ?, ?, ?)",
-                    LISTINO_MATERIALI).rowcount
-            if forza or con.execute("SELECT COUNT(*) FROM lavorazioni").fetchone()[0] == 0:
-                n_l = con.executemany(
-                    "INSERT OR IGNORE INTO lavorazioni (codice, nome, unita, costo_orario, ore_um) VALUES (?, ?, ?, ?, ?)",
-                    LISTINO_LAVORAZIONI).rowcount
-            con.execute("PRAGMA user_version = 1")
-            return n_m, n_l
+            if con.execute("PRAGMA user_version").fetchone()[0] >= VERSIONE_SCHEMA:
+                return None
+            validi_m = {(c, n) for c, n, *_ in LISTINO_MATERIALI}
+            validi_l = {(c, n) for c, n, *_ in LISTINO_LAVORAZIONI}
+            extra_m = [r["id"] for r in con.execute("SELECT id, codice, nome FROM materiali")
+                       if (r["codice"], r["nome"]) not in validi_m]
+            extra_l = [r["id"] for r in con.execute("SELECT id, codice, nome FROM lavorazioni")
+                       if (r["codice"], r["nome"]) not in validi_l]
+            if extra_m or extra_l:
+                self.backup_automatico()
+            con.executemany("DELETE FROM materiali WHERE id=?", [(i,) for i in extra_m])
+            con.executemany("DELETE FROM lavorazioni WHERE id=?", [(i,) for i in extra_l])
+            n_m = con.executemany(
+                "INSERT OR IGNORE INTO materiali (codice, nome, unita, prezzo, sfrido) VALUES (?, ?, ?, ?, ?)",
+                LISTINO_MATERIALI).rowcount
+            n_l = con.executemany(
+                "INSERT OR IGNORE INTO lavorazioni (codice, nome, unita, costo_orario, ore_um) VALUES (?, ?, ?, ?, ?)",
+                LISTINO_LAVORAZIONI).rowcount
+            con.execute(f"PRAGMA user_version = {VERSIONE_SCHEMA}")
+            return len(extra_m), len(extra_l), n_m, n_l
+
+    def aggiungi_listino_mancante(self):
+        """Aggiunge le voci del listino non ancora presenti (nessuna cancellazione)."""
+        with self.conn() as con:
+            n_m = con.executemany(
+                "INSERT OR IGNORE INTO materiali (codice, nome, unita, prezzo, sfrido) VALUES (?, ?, ?, ?, ?)",
+                LISTINO_MATERIALI).rowcount
+            n_l = con.executemany(
+                "INSERT OR IGNORE INTO lavorazioni (codice, nome, unita, costo_orario, ore_um) VALUES (?, ?, ?, ?, ?)",
+                LISTINO_LAVORAZIONI).rowcount
+        return n_m, n_l
 
     # ---- preventivi -------------------------------------------------------
     def salva_preventivo(self, titolo, cliente, inizio, consegna, km, calc, revisione, padre_id):
@@ -542,7 +564,7 @@ class DatabaseManager:
         return pid
 
 
-APP_VERSION = "2026-10-12 b"
+APP_VERSION = "2026-10-12 c"
 
 
 @st.cache_resource
@@ -910,7 +932,7 @@ def pagina_crud(db, cfg):
         st.info("Nessun elemento trovato.")
         if cfg.get("prefisso") and not q.strip():
             if st.button("📥 Carica il listino predefinito", key=f"listino_{tabella}"):
-                n_m, n_l = db.carica_listino_iniziale(forza=True)
+                n_m, n_l = db.aggiungi_listino_mancante()
                 st.session_state["_flash"] = f"Listino caricato: {n_m} materiali e {n_l} lavorazioni aggiunti."
                 st.rerun()
 
@@ -1353,7 +1375,13 @@ def main():
         st.stop()
 
     db = get_db()
-    db.carica_listino_iniziale()
+    esito = db.sincronizza_listino()
+    if esito:
+        del_m, del_l, add_m, add_l = esito
+        msg = f"Listino caricato: {add_m} materiali e {add_l} lavorazioni."
+        if del_m or del_l:
+            msg += f" Rimossi {del_m} materiali e {del_l} lavorazioni non presenti nel listino (voci di prova)."
+        st.session_state["_flash"] = msg
     keep_draft_alive()
     ensure_draft()
 
