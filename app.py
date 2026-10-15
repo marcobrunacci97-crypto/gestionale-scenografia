@@ -44,15 +44,18 @@ TIPO_LAVORAZIONE = "Lavorazione"
 TIPO_OPERATORI = "Manodopera / Operatori"
 TIPO_LOGISTICA = "Logistica"
 
-# (chiave, etichetta, nome della voce nel preventivo, chiave della paga oraria, paga di default)
+# Mestieri del personale operativo, nell'ordine in cui compaiono nel programma.
+# (chiave, etichetta, nome della voce nel preventivo, chiave della paga oraria, paga oraria di partenza in €/h)
+# Paghe di partenza: 40 €/h è il «Costo manodopera standard» del listino Excel; il fabbro parte da 45 €/h
+# (come le lavorazioni di saldatura del listino). Si modificano dalla pagina «Impostazioni».
 RUOLI = [
-    ("falegname", "Falegname", "Falegname (Cantiere/Opera)", "paga_falegname", 40.0),
-    ("fabbro", "Fabbro", "Fabbro (Cantiere/Opera)", "paga_fabbro", 45.0),
+    ("scultore", "Scultore", "Scultore (Cantiere/Opera)", "paga_scultore", 40.0),
     ("pittore", "Pittore", "Pittore (Cantiere/Opera)", "paga_pittore", 40.0),
-    ("elettricista", "Elettricista", "Elettricista (Cantiere/Opera)", "paga_elettricista", 40.0),
-    ("amministrazione", "Amministrazione", "Amministrazione", "paga_amministrazione", 25.0),
-    ("titolare", "Titolare / Direzione", "Titolare / Direzione", "paga_titolare", 40.0),
+    ("fabbro", "Fabbro", "Fabbro (Cantiere/Opera)", "paga_fabbro", 45.0),
+    ("formatore", "Formatore", "Formatore (Cantiere/Opera)", "paga_formatore", 40.0),
+    ("costruttore", "Costruttore", "Costruttore (Cantiere/Opera)", "paga_costruttore", 40.0),
 ]
+PAGA_PER_CHIAVE = {r[3]: r for r in RUOLI}
 
 IMPOSTAZIONI_DEFAULT = {
     "iva": (22.0, "%"),
@@ -62,12 +65,17 @@ IMPOSTAZIONI_DEFAULT = {
     "spese_generali": (20.0, "%"),
     "markup_finale": (30.0, "%"),
     "costo_km": (0.90, "€/km"),
-    "paga_falegname": (40.0, "€/h"),
-    "paga_fabbro": (45.0, "€/h"),
-    "paga_pittore": (40.0, "€/h"),
-    "paga_elettricista": (40.0, "€/h"),
-    "paga_amministrazione": (25.0, "€/h"),
-    "paga_titolare": (40.0, "€/h"),
+    **{r[3]: (r[4], "€/h") for r in RUOLI},
+}
+
+ETICHETTE_IMPOSTAZIONI = {
+    "iva": "IVA",
+    "sfrido_generale": "Sfrido generale",
+    "ricarico_materiali": "Ricarico materiali",
+    "ricarico_manodopera": "Ricarico manodopera",
+    "spese_generali": "Spese generali",
+    "markup_finale": "Markup finale",
+    "costo_km": "Costo al km",
 }
 
 PAGINA_DASHBOARD = "📊 Dashboard"
@@ -456,6 +464,11 @@ class DatabaseManager:
                 c.execute("UPDATE impostazioni SET unita=? WHERE chiave=? AND (unita IS NULL OR unita='')",
                           (unita, chiave))
 
+            # paghe di mestieri non più in uso (falegname, elettricista, amministrazione, titolare…): rimosse
+            paghe_valide = [r[3] for r in RUOLI]
+            c.execute("DELETE FROM impostazioni WHERE chiave GLOB 'paga_*' AND chiave NOT IN (%s)"
+                      % ",".join("?" * len(paghe_valide)), paghe_valide)
+
     # ---- impostazioni -----------------------------------------------------
     def get_imp(self):
         return {r["chiave"]: r["valore"] for r in self.query("SELECT chiave, valore FROM impostazioni")}
@@ -564,7 +577,7 @@ class DatabaseManager:
         return pid
 
 
-APP_VERSION = "2026-10-12 c"
+APP_VERSION = "2026-10-13 a"
 
 
 @st.cache_resource
@@ -781,6 +794,16 @@ def keep_draft_alive():
             st.session_state[k] = st.session_state[k]
 
 
+def chiave_ruolo(nome):
+    """Chiave del mestiere a cui corrisponde il nome di una voce di personale, es.
+    «Fabbro (Cantiere/Opera)» -> «fabbro». None se il mestiere non è più in uso."""
+    n = re.sub(r"\s*\(cantiere/opera\)\s*$", "", str(nome or ""), flags=re.I).strip().casefold()
+    for chiave, etichetta, *_ in RUOLI:
+        if etichetta.casefold() == n:
+            return chiave
+    return None
+
+
 def carica_revisione(pid):
     """Callback: copia un preventivo nella bozza come nuova revisione."""
     db = get_db()
@@ -798,13 +821,23 @@ def carica_revisione(pid):
     ss["d_inizio"] = parse_data(p["data_inizio"]) or oggi
     ss["d_consegna"] = parse_data(p["data_consegna"]) or (oggi + datetime.timedelta(days=15))
     ss["d_km"] = float(p["km_trasporto"] or 0)
-    per_nome = {r[2]: r[0] for r in RUOLI}
+    non_piu_in_uso = []
     for v in db.query("SELECT * FROM voci_preventivo WHERE preventivo_id=? ORDER BY id", (pid,)):
+        voce = {"tipo": v["tipo"], "nome": v["nome"], "qta": v["qta"], "um": v["um"],
+                "ore": v["ore"] or 0.0, "costo_base": v["costo_base"] or 0.0}
         if v["tipo"] in (TIPO_MATERIALE, TIPO_LAVORAZIONE):
-            ss["d_voci"].append({"tipo": v["tipo"], "nome": v["nome"], "qta": v["qta"], "um": v["um"],
-                                 "ore": v["ore"] or 0.0, "costo_base": v["costo_base"] or 0.0})
-        elif v["tipo"] == TIPO_OPERATORI and v["nome"] in per_nome:
-            ss[f"d_ore_{per_nome[v['nome']]}"] = float(v["ore"] or 0)
+            ss["d_voci"].append(voce)
+        elif v["tipo"] == TIPO_OPERATORI:
+            chiave = chiave_ruolo(v["nome"])
+            if chiave:
+                ss[f"d_ore_{chiave}"] = float(v["ore"] or 0)
+            else:  # mestiere non più in uso: la riga resta tra le voci, così il totale non cambia
+                ss["d_voci"].append(voce)
+                non_piu_in_uso.append(v["nome"])
+    if non_piu_in_uso:
+        ss["_avviso"] = ("Questo preventivo contiene personale di mestieri che non sono più in uso ("
+                         + ", ".join(non_piu_in_uso) + "). Le righe sono state mantenute tra le «Voci inserite» "
+                         "perché il totale resti uguale: rimuovile se non servono.")
     ss["pagina"] = PAGINA_COMPOSER
 
 
@@ -854,6 +887,9 @@ def mostra_flash():
     msg = st.session_state.pop("_flash", None)
     if msg:
         st.success(msg)
+    avviso = st.session_state.pop("_avviso", None)
+    if avviso:
+        st.warning(avviso)
 
 
 def pagina_dashboard(db):
@@ -1068,12 +1104,23 @@ def config_crud(db):
 def pagina_impostazioni(db):
     st.header("⚙️ Impostazioni")
     rows = db.query("SELECT chiave, valore, unita FROM impostazioni ORDER BY rowid")
-    st.caption("Parametri generali, paga oraria e ricarichi.")
+    ordine_mestieri = [r[3] for r in RUOLI]
+    generali = [r for r in rows if r["chiave"] not in PAGA_PER_CHIAVE]
+    paghe = sorted((r for r in rows if r["chiave"] in PAGA_PER_CHIAVE), key=lambda r: ordine_mestieri.index(r["chiave"]))
+    st.caption("Parametri generali, ricarichi e paga oraria dei mestieri.")
     with st.form("form_impostazioni"):
-        cols = st.columns(2)
         valori = {}
-        for i, r in enumerate(rows):
-            etichetta = r["chiave"].replace("_", " ").capitalize() + (f" ({r['unita']})" if r["unita"] else "")
+        st.subheader("Parametri generali")
+        cols = st.columns(2)
+        for i, r in enumerate(generali):
+            nome = ETICHETTE_IMPOSTAZIONI.get(r["chiave"], r["chiave"].replace("_", " ").capitalize())
+            etichetta = nome + (f" ({r['unita']})" if r["unita"] else "")
+            valori[r["chiave"]] = cols[i % 2].number_input(etichetta, min_value=0.0, value=float(r["valore"]),
+                                                            step=0.5, format="%.2f", key=f"imp_{r['chiave']}")
+        st.subheader("Paga oraria dei mestieri")
+        cols = st.columns(2)
+        for i, r in enumerate(paghe):
+            etichetta = f"{PAGA_PER_CHIAVE[r['chiave']][1]} (€/h)"
             valori[r["chiave"]] = cols[i % 2].number_input(etichetta, min_value=0.0, value=float(r["valore"]),
                                                             step=0.5, format="%.2f", key=f"imp_{r['chiave']}")
         salva = st.form_submit_button("💾 Salva impostazioni")
@@ -1087,7 +1134,8 @@ def pagina_impostazioni(db):
     with st.expander("ℹ️ Guida e formule di calcolo"):
         st.markdown(
             "- **Costo materiale** = Prezzo acquisto × Q.tà × (1 + Sfrido / 100)\n"
-            "- **Costo lavorazione / manodopera** = Costo orario × Ore\n"
+            "- **Costo lavorazione** = Costo orario della lavorazione × Ore\n"
+            "- **Costo del personale** = Ore del mestiere (Scultore, Pittore, Fabbro, Formatore, Costruttore) × la sua paga oraria\n"
             "- **Costo trasporto** = Km × Costo al km\n"
             "- **Prezzo di vendita di una riga** = Costo × (1 + Ricarico di categoria / 100) × (1 + Markup finale / 100). "
             "Il ricarico è quello dei materiali per i materiali, quello della manodopera per lavorazioni e personale; "
@@ -1276,8 +1324,10 @@ def pagina_composer(db):
     with st.container(border=True):
         st.subheader("Cantiere, trasporto e personale operativo")
         cols = st.columns(3)
-        for i, (chiave, etichetta, _, _, _) in enumerate(RUOLI):
-            cols[i % 3].number_input(f"Ore {etichetta}", min_value=0.0, step=0.5, format="%.2f", key=f"d_ore_{chiave}")
+        for i, (chiave, etichetta, _, chiave_paga, paga_default) in enumerate(RUOLI):
+            paga = float(imp.get(chiave_paga, paga_default))
+            cols[i % 3].number_input(f"Ore {etichetta}", min_value=0.0, step=0.5, format="%.2f", key=f"d_ore_{chiave}",
+                                     help=f"Paga oraria usata: {eur(paga)}/h (si modifica da «Impostazioni»).")
         st.number_input("Km trasporto A/R", min_value=0.0, step=1.0, format="%.1f", key="d_km")
 
     # -- riepilogo
